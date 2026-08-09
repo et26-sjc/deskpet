@@ -19,6 +19,7 @@ const {
   desktopPixelMatchRatio,
   desktopSurfaceMatchRatio,
   fitCaptureToLogicalBounds,
+  fixedWindowBoundsNeedRepair,
   groupShoutEvidenceLayout,
   presentAlwaysOnTopWindow,
   presentAlwaysOnTopWindowBounded,
@@ -167,6 +168,28 @@ test('scenario capture keeps an image already matching logical bounds', () => {
   };
 
   assert.equal(fitCaptureToLogicalBounds(image, { width: 180, height: 181 }), image);
+});
+
+test('fixed pet windows detect macOS height drift even when their bottom edges remain aligned', () => {
+  const expected = { x: 864, y: 425, width: 180, height: 180 };
+  const drifted = { x: 864, y: 393, width: 180, height: 212 };
+
+  assert.equal(fixedWindowBoundsNeedRepair(drifted, expected), true);
+  assert.equal(fixedWindowBoundsNeedRepair(expected, expected), false);
+});
+
+test('pet window resize invalidates cached bounds and scenario capture repairs drift before capturePage', () => {
+  const createWindowSource = mainSource.slice(
+    mainSource.indexOf('function createPetWindow'),
+    mainSource.indexOf('function validationSurfaceHtml')
+  );
+  const captureSource = mainSource.slice(
+    mainSource.indexOf('async function captureScenarioWindows'),
+    mainSource.indexOf('function performanceDuration')
+  );
+
+  assert.match(createWindowSource, /win\.on\('resize',[\s\S]*fixedWindowBoundsNeedRepair\([\s\S]*entry\.lastBounds\s*=\s*null/);
+  assert.match(captureSource, /fixedWindowBoundsNeedRepair\([\s\S]*safeSetPosition\([\s\S]*webContents\.capturePage\(\)/);
 });
 
 test('pet windows reassert topmost state after becoming visible', () => {

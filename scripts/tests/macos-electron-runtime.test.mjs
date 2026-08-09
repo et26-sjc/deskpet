@@ -23,29 +23,53 @@ test('macOS packaging ad-hoc signs and strictly verifies the app after plist and
   assert.ok(reportIndex > verifyIndex, 'macOS packaging must not report success before signature verification');
 });
 
-test('repairs only the three pinned macOS framework symlinks when their in-bundle targets exist', (t) => {
+test('repairs every pinned macOS framework symlink from the verified Electron archive', (t) => {
   if (process.platform !== 'darwin') return t.skip('macOS-only filesystem semantics');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-electron-links-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const framework = path.join(
-    root,
-    'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'Frameworks',
-    'Electron Framework.framework'
+  const frameworksRoot = path.join(
+    root, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'Frameworks'
   );
-  fs.mkdirSync(path.join(framework, 'Versions', 'A', 'Resources'), { recursive: true });
-  fs.writeFileSync(path.join(framework, 'Versions', 'A', 'Electron Framework'), 'fixture');
-  fs.cpSync(path.join(framework, 'Versions', 'A'), path.join(framework, 'Versions', 'Current'), { recursive: true });
-  fs.cpSync(path.join(framework, 'Versions', 'A', 'Resources'), path.join(framework, 'Resources'), { recursive: true });
-  fs.copyFileSync(
-    path.join(framework, 'Versions', 'A', 'Electron Framework'),
-    path.join(framework, 'Electron Framework')
-  );
+  const specs = [
+    ['Electron Framework', ['Electron Framework', 'Resources', 'Libraries', 'Helpers']],
+    ['ReactiveObjC', ['ReactiveObjC', 'Resources']],
+    ['Squirrel', ['Squirrel', 'Resources']],
+    ['Mantle', ['Mantle', 'Resources']]
+  ];
+
+  for (const [name, entries] of specs) {
+    const framework = path.join(frameworksRoot, `${name}.framework`);
+    const version = path.join(framework, 'Versions', 'A');
+    fs.mkdirSync(version, { recursive: true });
+    for (const entry of entries) {
+      const target = path.join(version, entry);
+      if (entry === name) fs.writeFileSync(target, 'fixture');
+      else {
+        fs.mkdirSync(target, { recursive: true });
+        fs.writeFileSync(path.join(target, 'fixture.txt'), 'fixture');
+      }
+    }
+    fs.cpSync(version, path.join(framework, 'Versions', 'Current'), { recursive: true });
+    for (const entry of entries) {
+      const source = path.join(version, entry);
+      const duplicate = path.join(framework, entry);
+      if (entry === name) fs.copyFileSync(source, duplicate);
+      else fs.cpSync(source, duplicate, { recursive: true });
+    }
+  }
 
   repairMissingMacFrameworkSymlinks(root);
 
-  assert.equal(fs.readlinkSync(path.join(framework, 'Versions', 'Current')), 'A');
-  assert.equal(fs.readlinkSync(path.join(framework, 'Resources')), path.join('Versions', 'Current', 'Resources'));
-  assert.equal(fs.readlinkSync(path.join(framework, 'Electron Framework')), path.join('Versions', 'Current', 'Electron Framework'));
+  for (const [name, entries] of specs) {
+    const framework = path.join(frameworksRoot, `${name}.framework`);
+    assert.equal(fs.readlinkSync(path.join(framework, 'Versions', 'Current')), 'A');
+    for (const entry of entries) {
+      assert.equal(
+        fs.readlinkSync(path.join(framework, entry)),
+        path.join('Versions', 'Current', entry)
+      );
+    }
+  }
 });
 
 test('does not create a framework symlink when its fixed target is absent', (t) => {

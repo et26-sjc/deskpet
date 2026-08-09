@@ -23,10 +23,20 @@ function allowedMacFrameworkLink(relative, target) {
   const normalizedTarget = target.replaceAll('\\', '/');
   if (!normalizedRelative.startsWith('release/macos/')) return false;
   const suffixes = new Map([
-    ['/Contents/Frameworks/Electron Framework.framework/Versions/Current', 'A'],
-    ['/Contents/Frameworks/Electron Framework.framework/Resources', 'Versions/Current/Resources'],
-    ['/Contents/Frameworks/Electron Framework.framework/Electron Framework', 'Versions/Current/Electron Framework']
-  ]);
+    ['Electron Framework', ['Electron Framework', 'Resources', 'Libraries', 'Helpers']],
+    ['ReactiveObjC', ['ReactiveObjC', 'Resources']],
+    ['Squirrel', ['Squirrel', 'Resources']],
+    ['Mantle', ['Mantle', 'Resources']]
+  ].flatMap(([name, entries]) => {
+    const framework = `/Contents/Frameworks/${name}.framework`;
+    return [
+      [`${framework}/Versions/Current`, 'A'],
+      ...entries.map((entry) => [
+        `${framework}/${entry}`,
+        `Versions/Current/${entry}`
+      ])
+    ];
+  }));
   for (const [suffix, expectedTarget] of suffixes) {
     if (normalizedRelative.endsWith(suffix) && normalizedTarget === expectedTarget) return true;
   }
@@ -59,8 +69,14 @@ function auditOutputLinks() {
           errors.push(`Unable to inspect output symlink: ${relative}`);
           continue;
         }
-        const resolvedTarget = path.resolve(path.dirname(full), target);
-        if (!allowedMacFrameworkLink(relative, target) || !staysInside(realRoot, resolvedTarget) || !fs.existsSync(resolvedTarget)) {
+        let resolvedTarget;
+        try {
+          resolvedTarget = fs.realpathSync(path.resolve(path.dirname(full), target));
+        } catch {
+          errors.push(`Output symlink or junction is not allowed: ${relative}`);
+          continue;
+        }
+        if (!allowedMacFrameworkLink(relative, target) || !staysInside(realRoot, resolvedTarget)) {
           errors.push(`Output symlink or junction is not allowed: ${relative}`);
         }
         continue;

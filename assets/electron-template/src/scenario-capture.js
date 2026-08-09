@@ -62,6 +62,13 @@ function fitCaptureToLogicalBounds(image, bounds) {
   return image.resize({ width, height, quality: 'best' });
 }
 
+function fixedWindowBoundsNeedRepair(actualBounds, expectedBounds) {
+  if (!actualBounds || !expectedBounds) return true;
+  return ['x', 'y', 'width', 'height'].some((key) => (
+    Math.round(Number(actualBounds[key])) !== Math.round(Number(expectedBounds[key]))
+  ));
+}
+
 function desktopPixelMatchRatio(frameImage, bounds, desktopImage, workArea) {
   if (!frameImage || !desktopImage || !bounds || !workArea) return 0;
   const frameSize = frameImage.getSize();
@@ -592,6 +599,7 @@ module.exports = {
   desktopPixelMatchRatio,
   desktopSurfaceMatchRatio,
   fitCaptureToLogicalBounds,
+  fixedWindowBoundsNeedRepair,
   groupShoutEvidenceLayout,
   presentAlwaysOnTopWindow,
   presentAlwaysOnTopWindowBounded,

@@ -48,6 +48,7 @@ const {
   desktopPixelMatchRatio,
   desktopSurfaceMatchRatio,
   fitCaptureToLogicalBounds,
+  fixedWindowBoundsNeedRepair,
   groupShoutEvidenceLayout,
   presentAlwaysOnTopWindow,
   presentAlwaysOnTopWindowBounded,
@@ -245,6 +246,10 @@ function createPetWindow(character) {
   };
   win.once('ready-to-show', showWindow);
   const entry = { win, interactive: false, lastBounds: null, lastRenderKey: null };
+  win.on('resize', () => {
+    if (!entry.lastBounds || win.isDestroyed()) return;
+    if (fixedWindowBoundsNeedRepair(win.getBounds(), entry.lastBounds)) entry.lastBounds = null;
+  });
   win.loadFile(PET_PAGE);
   win.on('closed', () => petWindows.delete(character.id));
   petWindows.set(character.id, entry);
@@ -1109,7 +1114,8 @@ function runtimeEvidenceEntry(kind, file, bytes, manifestFile) {
 async function captureScenarioWindows(label = null, expectedPhase = null, evidence = null) {
   const outputDir = process.env.PET_SCENARIO_CAPTURE_DIR;
   if (!outputDir || !scenarioTest) return;
-  const capturedPhase = engine.snapshot().shoutPhase || engine.mode;
+  const snapshot = engine.snapshot();
+  const capturedPhase = snapshot.shoutPhase || engine.mode;
   if (expectedPhase && capturedPhase !== expectedPhase) {
     throw new Error(`Scenario capture ${label || 'active'} changed from ${expectedPhase} to ${capturedPhase} before capture.`);
   }
@@ -1118,8 +1124,32 @@ async function captureScenarioWindows(label = null, expectedPhase = null, eviden
   await waitForScenarioSprites();
   const frames = [];
   const frameImages = [];
+  const petsById = new Map(snapshot.pets.map((pet) => [pet.id, pet]));
+  const padding = (config.render.windowSize - config.render.spriteSize) / 2;
   for (const [id, entry] of petWindows) {
     if (entry.win.isDestroyed()) continue;
+    const pet = petsById.get(id);
+    if (pet) {
+      const expectedBounds = {
+        x: Math.round(pet.x - padding),
+        y: Math.round(pet.y - padding),
+        width: config.render.windowSize,
+        height: config.render.windowSize
+      };
+      if (fixedWindowBoundsNeedRepair(entry.win.getBounds(), expectedBounds)) {
+        if (!safeSetPosition(
+          entry.win,
+          expectedBounds.x,
+          expectedBounds.y,
+          `scenario-capture:${id}`,
+          expectedBounds.width,
+          expectedBounds.height
+        )) {
+          throw new Error(`Scenario capture could not repair native bounds for ${id}.`);
+        }
+        entry.lastBounds = expectedBounds;
+      }
+    }
     const image = await boundedCaptureRetry(() => entry.win.webContents.capturePage());
     const file = `${id}.png`;
     const fullPath = path.join(captureDir, file);

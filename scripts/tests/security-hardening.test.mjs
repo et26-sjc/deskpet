@@ -2466,6 +2466,42 @@ test('output privacy audit allows generated sprites and same-name images with di
   assert.equal(result.status, 0, result.stderr);
 });
 
+test('output privacy audit accepts every pinned internal macOS framework symlink', (t) => {
+  if (process.platform !== 'darwin') return t.skip('macOS-only filesystem semantics');
+  const root = workspace(t);
+  createAuditFixture(root);
+  const frameworksRoot = path.join(
+    root, 'release', 'macos', 'Fixture.app', 'Contents', 'Frameworks'
+  );
+  const specs = [
+    ['Electron Framework', ['Electron Framework', 'Resources', 'Libraries', 'Helpers']],
+    ['ReactiveObjC', ['ReactiveObjC', 'Resources']],
+    ['Squirrel', ['Squirrel', 'Resources']],
+    ['Mantle', ['Mantle', 'Resources']]
+  ];
+
+  for (const [name, entries] of specs) {
+    const framework = path.join(frameworksRoot, `${name}.framework`);
+    const version = path.join(framework, 'Versions', 'A');
+    fs.mkdirSync(version, { recursive: true });
+    for (const entry of entries) {
+      const target = path.join(version, entry);
+      if (entry === name) fs.writeFileSync(target, 'fixture');
+      else fs.mkdirSync(target, { recursive: true });
+    }
+    fs.symlinkSync('A', path.join(framework, 'Versions', 'Current'));
+    for (const entry of entries) {
+      fs.symlinkSync(
+        path.join('Versions', 'Current', entry),
+        path.join(framework, entry)
+      );
+    }
+  }
+
+  const result = run('audit_output_privacy.mjs', ['--root', root]);
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('output privacy audit resolves symlinks before source comparison', (t) => {
   const workspaceRoot = workspace(t);
   const root = path.join(workspaceRoot, 'output');

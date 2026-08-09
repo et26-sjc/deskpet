@@ -186,6 +186,23 @@ function electronRuntimeLayout(runtimeRoot) {
 
   const app = path.join(dist, 'Electron.app');
   const framework = path.join(app, 'Contents', 'Frameworks', 'Electron Framework.framework');
+  const frameworksRoot = path.join(app, 'Contents', 'Frameworks');
+  const relativeLinks = [
+    ['Electron Framework', ['Electron Framework', 'Resources', 'Libraries', 'Helpers']],
+    ['ReactiveObjC', ['ReactiveObjC', 'Resources']],
+    ['Squirrel', ['Squirrel', 'Resources']],
+    ['Mantle', ['Mantle', 'Resources']]
+  ].flatMap(([name, entries]) => {
+    const frameworkRoot = path.join(frameworksRoot, `${name}.framework`);
+    return [
+      [path.join(frameworkRoot, 'Versions', 'Current'), 'A', frameworkRoot],
+      ...entries.map((entry) => [
+        path.join(frameworkRoot, entry),
+        path.join('Versions', 'Current', entry),
+        frameworkRoot
+      ])
+    ];
+  });
   return {
     dist,
     executable: path.join(app, 'Contents', 'MacOS', 'Electron'),
@@ -196,22 +213,14 @@ function electronRuntimeLayout(runtimeRoot) {
       path.join(app, 'Contents', 'Resources', 'default_app.asar'),
       path.join(app, 'Contents', 'Frameworks', 'Electron Helper.app', 'Contents', 'MacOS', 'Electron Helper')
     ],
-    relativeLinks: [
-      [path.join(framework, 'Versions', 'Current'), 'A'],
-      [path.join(framework, 'Resources'), path.join('Versions', 'Current', 'Resources')],
-      [path.join(framework, 'Electron Framework'), path.join('Versions', 'Current', 'Electron Framework')]
-    ]
+    relativeLinks
   };
 }
 
 export function repairMissingMacFrameworkSymlinks(runtimeRoot) {
   if (process.platform !== 'darwin') return;
   const layout = electronRuntimeLayout(runtimeRoot);
-  const frameworkRoot = path.join(
-    layout.dist,
-    'Electron.app', 'Contents', 'Frameworks', 'Electron Framework.framework'
-  );
-  for (const [link, expected] of layout.relativeLinks) {
+  for (const [link, expected, frameworkRoot] of layout.relativeLinks) {
     let existing = null;
     try {
       existing = fs.lstatSync(link);
@@ -316,8 +325,8 @@ export function ensureElectronRuntime(project) {
     partial = installPinnedRuntime('electron', runtimeRoot);
     verifyInstalledElectronArchive(partial);
     // pnpm's Electron postinstall may preserve the verified framework payload
-    // but dereference the archive's three relative links. After the official
-    // archive checksum is verified, recreate only those fixed in-bundle links.
+    // but dereference the archive's fixed relative links. After the official
+    // archive checksum is verified, recreate only those pinned in-bundle links.
     repairMissingMacFrameworkSymlinks(partial);
     const partialStatus = electronRuntimeProblems(partial);
     if (partialStatus.problems.length) throw new Error(`Installed Electron runtime is incomplete:\n- ${partialStatus.problems.join('\n- ')}`);
