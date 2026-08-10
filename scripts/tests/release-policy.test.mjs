@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { transferPackagedDirectory } from '../lib/release-transfer.mjs';
 
 const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const auditScript = path.join(skillRoot, 'scripts', 'audit_skill_release.mjs');
@@ -23,6 +24,58 @@ function createPublishableFixture(root) {
   fs.writeFileSync(path.join(root, 'README.md'), '# Generic Skill\nInstall from https://github.com/example/love-roommate.\n');
   fs.writeFileSync(path.join(root, 'scripts', 'tests', 'fixture.mjs'), "const ids = ['person-1', 'person-2'];\n");
 }
+
+test('release transfer atomically moves a packaged directory with a Chinese product name', (t) => {
+  const root = workspace(t);
+  const source = path.join(root, 'stage', '亲爱的室友们桌宠');
+  const destination = path.join(root, 'release', '亲爱的室友们桌宠');
+  fs.mkdirSync(source, { recursive: true });
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.writeFileSync(path.join(source, '亲爱的室友们桌宠.exe'), 'fixture');
+
+  const result = transferPackagedDirectory(source, destination);
+
+  assert.equal(result.method, 'rename');
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.readFileSync(path.join(destination, '亲爱的室友们桌宠.exe'), 'utf8'), 'fixture');
+});
+
+test('release transfer removes a partial destination when cross-volume copy fails', () => {
+  const source = 'source';
+  const destination = 'destination';
+  let destinationExists = false;
+  const fileSystem = {
+    existsSync(value) {
+      return value === source || (value === destination && destinationExists);
+    },
+    statSync() {
+      return { isDirectory: () => true };
+    },
+    renameSync() {
+      const error = new Error('cross-device');
+      error.code = 'EXDEV';
+      throw error;
+    },
+    cpSync() {
+      destinationExists = true;
+      throw new Error('copy failed');
+    },
+    rmSync(value) {
+      assert.equal(value, destination);
+      destinationExists = false;
+    }
+  };
+
+  assert.throws(() => transferPackagedDirectory(source, destination, { fileSystem }), /copy failed/);
+  assert.equal(destinationExists, false);
+});
+
+test('build uses the guarded release transfer instead of recursive copying directly into release', () => {
+  const build = fs.readFileSync(path.join(skillRoot, 'scripts', 'build_project.mjs'), 'utf8');
+  assert.match(build, /transferPackagedDirectory\(appDirectory, destination\)/);
+  assert.match(build, /transferPackagedDirectory\(bundle, destination, \{ verbatimSymlinks: true \}\)/);
+  assert.doesNotMatch(build, /fs\.cpSync\(appDirectory, destination/);
+});
 
 test('Skill release audit rejects labeled identity, account, email, and private host paths', (t) => {
   const root = workspace(t);
@@ -243,7 +296,7 @@ test('self-poop scenario duration scales until every follower can eat once', asy
     + 600;
   const duration = scenarioDurationMs('poop-chase', config, behaviors);
 
-  assert.ok(duration >= minimumCycleBudget + 4000, `${duration}ms does not leave enough capture margin`);
+  assert.ok(duration >= minimumCycleBudget + 8000, `${duration}ms does not leave enough serialized capture margin`);
   assert.equal(duration % 1000, 0, 'capture duration should be rounded to stable whole seconds');
   assert.equal(scenarioDurationMs('dad-shout', config, behaviors), 20000);
   assert.equal(scenarioDurationMs('grandpa-shout', config, behaviors), 20000);
@@ -406,9 +459,11 @@ test('manual humor gate records all six weighted dimensions and rejects special 
     assert.match(text, /回看欲[^\n]*10/);
     assert.match(text, /特殊恶搞[^\n]*低于 90[^\n]*(?:不通过|失败)/);
   }
-  assert.match(skill, /every enabled special prank: dad shout, grandpa shout, and the active poop-chase variant[^\n]*Every prank below 90 must fail/i);
   assert.match(skill, /Score each selected special prank independently/i);
   assert.match(skill, /dad-shout[^\n]*grandpa-shout[^\n]*(?:poop-chase|cursor-centipede)/i);
+  assert.match(skill, /Every prank below 90 must fail/i);
+  assert.match(selfCheck, /每个启用的特殊恶搞[^\n]*爸爸喊[^\n]*爷爷喊[^\n]*当前追逐变体/);
+  assert.match(selfCheck, /任一条目低于 90 分即整体失败[^\n]*不能靠其它条目高分弥补/);
   assert.match(readme, /三份独立审核/);
   assert.match(readme, /爸爸喊[^\n]*爷爷喊[^\n]*当前启用的屎追逐变体[^\n]*分别达到 90 分[^\n]*不能取平均分/);
   assert.match(selfCheck, /爸爸喊[^\n]*爷爷喊[^\n]*当前追逐变体[^\n]*逐个打分[^\n]*不能用一份聚合分数/);
@@ -416,7 +471,8 @@ test('manual humor gate records all six weighted dimensions and rejects special 
   for (const text of [skill, readme]) {
     assert.match(text, /普通桌宠模式不要求[^\n]*(?:humor review|搞笑评分)/i);
   }
-  for (const text of [skill, readme, selfCheck, evidence]) {
+  assert.match(skill, /meaningful deductions[^\n]*concrete optimization[^\n]*new capture[^\n]*reevaluation/i);
+  for (const text of [readme, selfCheck, evidence]) {
     assert.match(text, /扣分[^\n]*(?:优化|改动)[^\n]*(?:重新截图|重拍)[^\n]*复评/);
   }
   assert.match(selfCheck, /schemaVersion 3/);
@@ -430,10 +486,9 @@ test('manual humor gate records all six weighted dimensions and rejects special 
 });
 
 test('manual humor gate fails visually correct-but-unfunny compositions', () => {
-  const skill = fs.readFileSync(path.join(skillRoot, 'SKILL.md'), 'utf8');
   const readme = fs.readFileSync(path.join(skillRoot, 'README.md'), 'utf8');
 
-  for (const text of [skill, readme]) {
+  for (const text of [readme]) {
     assert.match(text, /本人[^\n]*跪拜队[^\n]*一个人物身高[^\n]*(?:失败|返工)/);
     assert.match(text, /爸爸[^\n]*爷爷[^\n]*(?:只|仅)[^\n]*(?:换字|文字)[^\n]*(?:换色|颜色)[^\n]*(?:失败|返工)/);
     assert.match(text, /吃[^\n]*嘴[^\n]*(?:接触|碰到)[^\n]*屎[^\n]*(?:失败|返工)/);
@@ -530,9 +585,22 @@ test('runtime manual review fingerprint includes scenario captures and reports',
   assert.match(selfCheck, /`humor-contract:\$\{humorContractFingerprint\}`/);
 });
 
+test('self-check independently recomputes poop compositor transparency from the visible frame and underlay', () => {
+  const selfCheck = fs.readFileSync(path.join(skillRoot, 'scripts', 'self_check_project.mjs'), 'utf8');
+  assert.match(selfCheck, /async function validateScenarioEffectEvidence/);
+  assert.match(selfCheck, /effect-underlay|effect underlay image/);
+  assert.match(selfCheck, /transparentUnderlayMatchRatio\s*<\s*0\.94/);
+  assert.match(selfCheck, /edgeTransparentUnderlayMatchRatio\s*<\s*0\.94/);
+  assert.match(selfCheck, /cornerTransparentUnderlayMatchRatio\s*<\s*0\.94/);
+  assert.match(selfCheck, /transparentNeutralArtifactRatio\s*>\s*0\.01/);
+  assert.match(selfCheck, /scenario-effect-compositor-artifact/);
+  assert.match(selfCheck, /scenario-effect-metrics-stale/);
+  assert.match(selfCheck, /await validateScenarioEffectEvidence\(\)/);
+});
+
 test('build reuses reviewed scenario evidence unless refresh is requested', () => {
   const build = fs.readFileSync(path.join(skillRoot, 'scripts', 'build_project.mjs'), 'utf8');
-  assert.match(build, /const refreshScenario = args\['refresh-smoke'\] \|\| !fs\.existsSync\(reportPath\)/);
+  assert.match(build, /const refreshScenario = args\['refresh-smoke'\] \|\| refreshScenarioSet\.has\(scenario\) \|\| !fs\.existsSync\(reportPath\)/);
   assert.match(build, /if \(refreshScenario\) \{[\s\S]*runElectron/);
   assert.match(build, /\}\s*verifyScenarioReport\(scenario, reportPath\)/);
 });

@@ -117,7 +117,7 @@ function phase(durationMs, pids, tickerUpdatesPerSecond = 30, petIds = []) {
   };
 }
 
-function fixture(windowCount = 5) {
+function fixture(windowCount = 5, { quick = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'love-roommate-performance-gate-v3-'));
   const project = path.join(root, 'project');
   const packagedRoot = path.join(root, 'packaged', 'resources', 'app');
@@ -146,20 +146,24 @@ function fixture(windowCount = 5) {
   const centipedePids = [...basePids, 100 + basePids.length];
   const allPids = [...centipedePids, 100 + centipedePids.length];
   const petIds = config.characters.map((entry) => entry.id);
+  const durations = quick
+    ? { idle: 5000, centipede: 5000, 'poop-chase': 5000, 'dad-shout': 5000, 'grandpa-shout': 5000, soak: 5000, pause: 5000 }
+    : { idle: 60000, centipede: 60000, 'poop-chase': 60000, 'dad-shout': 9000, 'grandpa-shout': 9000, soak: 600000, pause: 30000 };
   const phases = {
-    idle: phase(60000, basePids, 30, petIds),
-    centipede: phase(60000, centipedePids, 30, petIds),
-    'poop-chase': phase(60000, allPids, 30, petIds),
-    'dad-shout': phase(9000, allPids, 30, petIds),
-    'grandpa-shout': phase(9000, allPids, 30, petIds),
-    soak: phase(600000, allPids, 30, petIds),
-    pause: phase(30000, allPids, 4, petIds)
+    idle: phase(durations.idle, basePids, 30, petIds),
+    centipede: phase(durations.centipede, centipedePids, 30, petIds),
+    'poop-chase': phase(durations['poop-chase'], allPids, 30, petIds),
+    'dad-shout': phase(durations['dad-shout'], allPids, 30, petIds),
+    'grandpa-shout': phase(durations['grandpa-shout'], allPids, 30, petIds),
+    soak: phase(durations.soak, allPids, 30, petIds),
+    pause: phase(durations.pause, allPids, 4, petIds)
   };
   const runtimeFingerprint = audit.runtimeFingerprintForProject(project);
   const candidateFingerprint = audit.candidateFingerprintForProject(project);
   const executableSha256 = crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex');
   const runnerCompletedAt = Date.now();
-  const runnerLaunchedAt = runnerCompletedAt - 900000;
+  const runnerElapsedMs = Object.values(durations).reduce((total, duration) => total + duration, 0) + 10000;
+  const runnerLaunchedAt = runnerCompletedAt - runnerElapsedMs;
   const report = {
     schemaVersion: audit.PERFORMANCE_REPORT_SCHEMA_VERSION,
     fingerprintSchemaVersion: audit.PERFORMANCE_FINGERPRINT_SCHEMA_VERSION,
@@ -187,7 +191,8 @@ function fixture(windowCount = 5) {
     soak: { memoryGrowthMb: 10, memoryGrowthMetric: 'private-bytes' },
     pauseComparison: { activePhase: 'poop-chase', activeAverageCpuPercent: 5, pausedAverageCpuPercent: 1, ratio: 0.2, activeTickerUpdatesPerSecond: 30, pausedTickerUpdatesPerSecond: 4, tickerRatio: 0.133 },
     runner: {
-      outerTimeoutMs: 1500000,
+      profile: quick ? 'quick' : 'full',
+      outerTimeoutMs: quick ? 120000 : 1500000,
       launchedAt: new Date(runnerLaunchedAt).toISOString(),
       completedAt: new Date(runnerCompletedAt).toISOString(),
       elapsedMs: runnerCompletedAt - runnerLaunchedAt,
@@ -205,8 +210,8 @@ function fixture(windowCount = 5) {
   return { project, packagedRoot, executable, reportPath, report };
 }
 
-function runValidator(project, reportPath, executable, packagedRoot) {
-  return spawnSync(process.execPath, [validator, '--project', project, '--report', reportPath, '--executable', executable, '--packaged-root', packagedRoot], { cwd: skillRoot, encoding: 'utf8', shell: false });
+function runValidator(project, reportPath, executable, packagedRoot, profile = null) {
+  return spawnSync(process.execPath, [validator, '--project', project, '--report', reportPath, '--executable', executable, '--packaged-root', packagedRoot, ...(profile ? ['--profile', profile] : [])], { cwd: skillRoot, encoding: 'utf8', shell: false });
 }
 
 function runReleaseValidator(five, eight) {
@@ -235,6 +240,19 @@ test('packaged performance runner records launch, partial, exit, and total-deadl
   assert.match(source, /executableExitCode/);
   assert.match(source, /minimumFullTimeoutMs/);
   assert.match(source, /validate_performance_report\.mjs/);
+  assert.match(source, /completedEvaluationFailure/);
+});
+
+test('release workflow warms each packaged fixture before its full audit without relaxing thresholds', () => {
+  const source = fs.readFileSync(path.join(skillRoot, 'scripts', 'run_workflow.mjs'), 'utf8');
+  const fiveWarmup = source.indexOf("warmPerformanceFixture('five-window'");
+  const fiveAudit = source.indexOf("runNodeStage('five-window full performance audit'");
+  const eightWarmup = source.indexOf("warmPerformanceFixture('eight-window'");
+  const eightAudit = source.indexOf("runNodeStage('eight-window full performance audit'");
+  assert.ok(fiveWarmup >= 0 && fiveWarmup < fiveAudit);
+  assert.ok(eightWarmup > fiveAudit && eightWarmup < eightAudit);
+  assert.match(source, /PET_SMOKE_TEST:\s*'1'/);
+  assert.doesNotMatch(source, /startupVisibleMsMax\s*[:=]/);
 });
 
 test('build verification passes the measured packaged executable and runtime root to the performance validator', () => {
@@ -262,6 +280,14 @@ test('validator accepts a fresh complete passing report', { skip: !available }, 
   const result = runValidator(fixtureValue.project, fixtureValue.reportPath, fixtureValue.executable, fixtureValue.packagedRoot);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Performance report valid/);
+});
+
+test('quick validator accepts only an explicitly quick five-second packaged smoke report', { skip: !available }, () => {
+  const fixtureValue = fixture(5, { quick: true });
+  const quickResult = runValidator(fixtureValue.project, fixtureValue.reportPath, fixtureValue.executable, fixtureValue.packagedRoot, 'quick');
+  assert.equal(quickResult.status, 0, quickResult.stderr);
+  const fullResult = runValidator(fixtureValue.project, fixtureValue.reportPath, fixtureValue.executable, fixtureValue.packagedRoot);
+  assert.notEqual(fullResult.status, 0);
 });
 
 test('validator rejects a non-PE file even when its hash matches the report', { skip: !available }, () => {

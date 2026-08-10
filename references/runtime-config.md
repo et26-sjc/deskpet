@@ -13,7 +13,7 @@
 - `selection.userCharacterId`: `null` when the user says they are not in the photo, otherwise the explicitly selected character id. The selected character is the standing recipient for group shout; null means there is no recipient. Never infer it from position or appearance.
 - `selection.chaseVariant`: derived rather than asked. `self-poop` when `selection.userCharacterId` is non-null; `cursor-centipede` when it is null. Raw mode keys and this variant stay internal.
 - 跪喊规则：有本人时，本人站立不跪，其他角色全部跪下喊爸爸或爷爷；没有指定本人时，不得虚构接收者，全员跪下喊爸爸或爷爷。
-- 屎追逐规则：有本人时，本人负责持续拉，其他角色全员追吃；本人不在照片时，鼠标控制一坨点击穿透的屎，所有角色组成不断链的人形蜈蚣追着它移动。
+- 屎追逐规则：有本人时，整队只缓慢移动到本人所在屏幕的安全位置一次，之后固定；普通鼠标移动不影响任何人，只有拖拽本人时整队与当前屎才整体重定位，松手后固定。本人持续拉，其他角色全员追吃。本人不在照片时，鼠标控制一坨点击穿透的屎，所有角色组成不断链的人形蜈蚣，使用限速、加速度和死区平滑追着它移动，禁止瞬移。
 - `packaging.windowsTarget`: `portable` in v1.
 - `packaging.macTarget`: `dir` in v1.
 - `packaging.macArch`: `arm64` in v1.
@@ -26,8 +26,8 @@
 - `groupShout.gatherSpeed`, `kneelDelayMs`, `frameDurationMs`: cap visible movement for both the standing recipient and eligible row participants, hold the completed kneeling row, then time synchronized shout frames `0 -> 1 -> 2`.
 - `centipede.enabled`, `maxSpeed`, `followStrength`, `connectionTolerance`, `flies`, and `exitShout`. The connected row keeps its fixed shape while moving as one unit toward the cursor.
 - `poopChase.enabled`, `variant`, `sourceId`, `participantIds`, `maxSpeed`, `followStrength`, `deadZone`, `gap`, `initialDropDelayMs`, `dropVisibleBeforeEatMs`, `poopDurationMs`, `eatRadius`, `eatDurationMs`, `consumedDelayMs`, `roundResetDelayMs`, `droppingTtlMs`, `poopSize`, and `stinkSize`.
-- `poopChase.maxDroppings`: fixed at `1`. For `self-poop`, `sourceId` remains the selected self and eaters never become the pooping source. For `cursor-centipede`, `sourceId` is null and the click-through effect follows the real cursor.
-- `freeRoam.speedMin`, `speedMax`, `turnIntervalMs`.
+- `poopChase.maxDroppings`: fixed at `1`. For `self-poop`, `sourceId` remains the selected self, ordinary cursor motion is ignored after one safe formation placement, dragging is accepted only from self and translates the complete queue plus current dropping, and eaters never become the pooping source. For `cursor-centipede`, `sourceId` is null and the click-through effect follows the real cursor with the configured speed cap, acceleration cap, and `deadZone`.
+- `freeRoam.speedMin`, `speedMax`, `turnIntervalMs`. When `selection.userCharacterId` is non-null, free-roam movement for that selected self uses upright `idle_left` / `idle_right` artwork and never `crawl_*` or `centipede_*`; every non-self character keeps the normal crawl behavior.
 - `prankEffects.enabled`: master switch for poop, flies, slime, and stink visuals.
 
 ## `src/assets/sprites/manifest.json`

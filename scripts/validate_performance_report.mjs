@@ -9,7 +9,13 @@ import { sensitivePathMatches } from './lib/privacy.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.project || !args.report || !args.executable || !args['packaged-root']) {
-  console.error('Usage: node validate_performance_report.mjs --project <project> --report <report> --executable <exe> --packaged-root <resources/app>');
+  console.error('Usage: node validate_performance_report.mjs --project <project> --report <report> --executable <exe> --packaged-root <resources/app> [--profile <full|quick>]');
+  process.exit(1);
+}
+
+const profile = args.profile || 'full';
+if (!['full', 'quick'].includes(profile)) {
+  console.error('Performance validation profile must be full or quick.');
   process.exit(1);
 }
 
@@ -128,7 +134,8 @@ if (report && config && expectedFingerprint && packagedFingerprint && expectedCa
   const executableSha256 = crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex');
   if (report.runtime?.executableSha256 !== executableSha256) errors.push('Performance report executable SHA-256 does not match the measured executable.');
   if (report.runtime?.artifactFingerprintSha256 !== artifactFingerprintSha256) errors.push('Performance report artifact fingerprint does not match the complete Electron portable directory.');
-  if (report.runner?.outerTimeoutMs < 20 * 60 * 1000 || report.runner?.executableExitCode !== 0 || report.runner?.timedOut !== false || report.runner?.crashed !== false || report.runner?.reportState !== 'complete') {
+  const minimumOuterTimeoutMs = profile === 'quick' ? 60_000 : 20 * 60 * 1000;
+  if (report.runner?.profile !== profile || report.runner?.outerTimeoutMs < minimumOuterTimeoutMs || report.runner?.executableExitCode !== 0 || report.runner?.timedOut !== false || report.runner?.crashed !== false || report.runner?.reportState !== 'complete') {
     errors.push('Performance runner did not complete cleanly inside the required outer timeout.');
   }
   const runnerLaunchedAt = Date.parse(report.runner?.launchedAt);
@@ -154,7 +161,9 @@ if (report && config && expectedFingerprint && packagedFingerprint && expectedCa
     && (generatedAt < runnerLaunchedAt - 5000 || generatedAt > runnerCompletedAt + 5000)) {
     errors.push('Performance report generation time is outside the runner interval.');
   }
-  const minimumDurations = { idle: 60000, centipede: 60000, 'poop-chase': 60000, 'dad-shout': 1000, 'grandpa-shout': 1000, soak: 600000, pause: 30000 };
+  const minimumDurations = profile === 'quick'
+    ? { idle: 5000, centipede: 5000, 'poop-chase': 5000, 'dad-shout': 5000, 'grandpa-shout': 5000, soak: 5000, pause: 5000 }
+    : { idle: 60000, centipede: 60000, 'poop-chase': 60000, 'dad-shout': 1000, 'grandpa-shout': 1000, soak: 600000, pause: 30000 };
   for (const [name, minimum] of Object.entries(minimumDurations)) {
     const actual = report.phases?.[name]?.durationMs;
     if (!Number.isFinite(actual) || actual < minimum) errors.push(`Performance phase ${name} must run for at least ${minimum}ms.`);

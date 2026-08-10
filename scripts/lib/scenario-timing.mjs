@@ -39,6 +39,9 @@ export function scenarioDurationMs(scenario, config = {}, behaviors = {}) {
     + followerCount * perFollower
     + nonNegative(settings.consumedDelayMs, 240)
     + nonNegative(settings.roundResetDelayMs, 600)
-    + 4000;
+    // Reserve an additional post-sequence window for the scheduled active
+    // compositor capture. Captures are serialized because overlapping
+    // hide/show cycles can corrupt the underlay comparison.
+    + 8000;
   return Math.max(6000, Math.ceil(required / 1000) * 1000);
 }

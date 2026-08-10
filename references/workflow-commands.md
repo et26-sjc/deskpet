@@ -2,6 +2,22 @@
 
 把占位符替换为 `codex_app__load_workspace_dependencies` 返回的路径。直接调用返回的 Node 可执行文件，不依赖用户的 `PATH`。
 
+## 平衡模式统一入口
+
+日常制作优先调用统一入口，让脚本自动比较人物、动作、配置、运行代码和证据指纹。成功时只输出阶段摘要；完整日志保存在系统临时目录，失败时才展开关键内容。
+
+```text
+"<codex-node>" "<skill>/scripts/run_workflow.mjs" --profile iteration --root "<输出根目录>" --source "<照片>" --pnpm "<codex-pnpm>" --node-modules "<codex-node-modules>"
+"<codex-node>" "<skill>/scripts/run_workflow.mjs" --profile delivery --root "<输出根目录>" --source "<照片>" --pnpm "<codex-pnpm>" --node-modules "<codex-node-modules>"
+"<codex-node>" "<skill>/scripts/run_workflow.mjs" --profile skill-release --pnpm "<codex-pnpm>" --node-modules "<codex-node-modules>"
+```
+
+- `iteration`：始终运行项目结构验证；项目指纹和通过报告都未变化时复用 self-check。动作变化时只把依赖该动作的人物和场景列为待复查，不打包、不运行 Skill 全套测试。
+- `delivery`：检查实际项目全部启用场景，按 `.workflow-state-v1.json` 只刷新受影响的运行证据，然后打包、运行 packaged smoke 和真实 EXE 快速性能检查。
+- `skill-release`：运行完整 Skill 测试和官方验证器。公共候选代码指纹变化或缓存失效时，自动生成无真人素材的 5/8 窗口夹具并运行完整 packaged 性能审计。
+
+`preview/workflow-summary.json` 是默认的小型读取入口；不要在缓存命中时重新读取大型 self-check、场景或性能报告。`.workflow-state-v1.json` 只保存相对文件名、通用人物编号和 SHA-256，不保存姓名、照片或绝对路径。
+
 ## 创建项目
 
 ```text
@@ -99,6 +115,8 @@
 "<codex-node>" "<skill>/scripts/build_project.mjs" --project "<输出根目录>/project" --source "<照片>" --pnpm "<codex-pnpm>" --node-modules "<codex-node-modules>" [--verify-only]
 ```
 
+统一入口在交付时会传 `--performance-profile quick`，使当前实际成品完成短时真实 EXE 性能检查，而不要求每个照片项目重复 5+8 人长测。直接调用构建器时默认仍是 `--performance-profile full`，保持旧发布流程失败关闭。增量刷新使用 `--refresh-runtime` 和 `--refresh-scenarios <逗号分隔场景>`；`--refresh-smoke` 仍表示刷新全部运行与场景证据。
+
 先运行一次以采集运行窗口和场景证据；打开图片完成审核并更新运行时审核指纹后，再次运行以打包。第二次运行会自动启动复制后的最终 `.exe` 或 `.app`，生成 `preview/<platform>-packaged-smoke.png`，并对打包输出重复执行隐私审计。
 
 剩余托盘、拖拽、右键和点击穿透检查需要直接启动复制后的产物：
@@ -113,6 +131,8 @@ macOS:   "<输出根目录>/release/macos/<应用>.app/Contents/MacOS/<应用>"
 ```text
 "<codex-node>" "<skill>/scripts/release_check.mjs"
 ```
+
+默认输出为不超过约 20 行的阶段摘要；失败时显示对应日志，`--verbose` 可主动展开完整测试输出。无参数调用始终代表完整发布检查，不会降级成快速检查。
 
 把 `CODEX_PNPM` 设置为 Codex 的 pnpm 路径。官方验证器或带 PyYAML 的 Python 不可用时，检查必须关闭放行；只有明确的本地临时豁免才可设置 `SKIP_OFFICIAL_VALIDATOR=1`。
 

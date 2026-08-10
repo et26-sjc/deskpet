@@ -193,6 +193,176 @@ function releaseEligibleScenarioEvidencePaths(root) {
   return [...new Set(references)].sort((left, right) => left.localeCompare(right));
 }
 
+function effectEvidenceMetrics(effectRaw, desktopRaw, underlayRaw, bounds, compositionBounds, alphaThreshold = 12) {
+  const empty = {
+    transparentUnderlayMatchRatio: 0,
+    edgeTransparentUnderlayMatchRatio: 0,
+    cornerTransparentUnderlayMatchRatio: 0,
+    transparentNeutralArtifactRatio: 1,
+    visibleNeutralPixelRatio: 1,
+    visiblePalePixelRatio: 1,
+    visibleCompositorChangeRatio: 0
+  };
+  if (!effectRaw?.data || !desktopRaw?.data || !underlayRaw?.data || !bounds || !compositionBounds) return empty;
+  if (desktopRaw.info.width !== underlayRaw.info.width || desktopRaw.info.height !== underlayRaw.info.height) return empty;
+  const desktopScaleX = desktopRaw.info.width / Math.max(1, compositionBounds.width);
+  const desktopScaleY = desktopRaw.info.height / Math.max(1, compositionBounds.height);
+  const logicalScaleX = bounds.width / Math.max(1, effectRaw.info.width);
+  const logicalScaleY = bounds.height / Math.max(1, effectRaw.info.height);
+  const threshold = Math.max(0, Math.min(127, Math.round(Number(alphaThreshold) || 0)));
+  const edgeBand = Math.max(1, Math.ceil(Math.min(effectRaw.info.width, effectRaw.info.height) * 0.12));
+  let transparentSamples = 0;
+  let transparentMatches = 0;
+  let edgeTransparentSamples = 0;
+  let edgeTransparentMatches = 0;
+  let cornerTransparentSamples = 0;
+  let cornerTransparentMatches = 0;
+  let transparentNeutralArtifacts = 0;
+  let visibleSamples = 0;
+  let visibleColorSamples = 0;
+  let visibleNeutralPixels = 0;
+  let visiblePalePixels = 0;
+  let visibleChangedPixels = 0;
+  for (let y = 0; y < effectRaw.info.height; y += 1) {
+    for (let x = 0; x < effectRaw.info.width; x += 1) {
+      const effectOffset = (y * effectRaw.info.width + x) * 4;
+      const logicalX = bounds.x - compositionBounds.x + (x + 0.5) * logicalScaleX;
+      const logicalY = bounds.y - compositionBounds.y + (y + 0.5) * logicalScaleY;
+      const desktopX = Math.max(0, Math.min(desktopRaw.info.width - 1, Math.floor(logicalX * desktopScaleX)));
+      const desktopY = Math.max(0, Math.min(desktopRaw.info.height - 1, Math.floor(logicalY * desktopScaleY)));
+      const desktopOffset = (desktopY * desktopRaw.info.width + desktopX) * 4;
+      const delta = Math.max(
+        Math.abs(desktopRaw.data[desktopOffset] - underlayRaw.data[desktopOffset]),
+        Math.abs(desktopRaw.data[desktopOffset + 1] - underlayRaw.data[desktopOffset + 1]),
+        Math.abs(desktopRaw.data[desktopOffset + 2] - underlayRaw.data[desktopOffset + 2])
+      );
+      const alpha = effectRaw.data[effectOffset + 3];
+      const effectMax = Math.max(effectRaw.data[effectOffset], effectRaw.data[effectOffset + 1], effectRaw.data[effectOffset + 2]);
+      const effectMin = Math.min(effectRaw.data[effectOffset], effectRaw.data[effectOffset + 1], effectRaw.data[effectOffset + 2]);
+      const onHorizontalEdge = x < edgeBand || x >= effectRaw.info.width - edgeBand;
+      const onVerticalEdge = y < edgeBand || y >= effectRaw.info.height - edgeBand;
+      if (alpha <= threshold) {
+        transparentSamples += 1;
+        if (delta <= 36) transparentMatches += 1;
+        if (onHorizontalEdge || onVerticalEdge) {
+          edgeTransparentSamples += 1;
+          if (delta <= 36) edgeTransparentMatches += 1;
+        }
+        if (onHorizontalEdge && onVerticalEdge) {
+          cornerTransparentSamples += 1;
+          if (delta <= 36) cornerTransparentMatches += 1;
+        }
+        const desktopMax = Math.max(desktopRaw.data[desktopOffset], desktopRaw.data[desktopOffset + 1], desktopRaw.data[desktopOffset + 2]);
+        const desktopMin = Math.min(desktopRaw.data[desktopOffset], desktopRaw.data[desktopOffset + 1], desktopRaw.data[desktopOffset + 2]);
+        if (delta > 36 && desktopMax - desktopMin <= 24) transparentNeutralArtifacts += 1;
+      } else {
+        visibleSamples += 1;
+        if (alpha >= 96) {
+          visibleColorSamples += 1;
+          if (effectMax - effectMin <= 24) visibleNeutralPixels += 1;
+          if (effectMin >= 200) visiblePalePixels += 1;
+        }
+        if (delta > 18) visibleChangedPixels += 1;
+      }
+    }
+  }
+  const ratio = (value, total, emptyValue = 0) => total ? Number((value / total).toFixed(6)) : emptyValue;
+  return {
+    transparentUnderlayMatchRatio: ratio(transparentMatches, transparentSamples),
+    edgeTransparentUnderlayMatchRatio: ratio(edgeTransparentMatches, edgeTransparentSamples),
+    cornerTransparentUnderlayMatchRatio: ratio(cornerTransparentMatches, cornerTransparentSamples),
+    transparentNeutralArtifactRatio: ratio(transparentNeutralArtifacts, transparentSamples, 1),
+    visibleNeutralPixelRatio: ratio(visibleNeutralPixels, visibleColorSamples, 1),
+    visiblePalePixelRatio: ratio(visiblePalePixels, visibleColorSamples, 1),
+    visibleCompositorChangeRatio: ratio(visibleChangedPixels, visibleSamples)
+  };
+}
+
+async function validateScenarioEffectEvidence() {
+  if (!fs.existsSync(scenarioRoot)) return;
+  const resolveEvidence = (scenarioDirectory, relative, label) => {
+    if (typeof relative !== 'string' || !relative) throw new Error(`${label} is missing.`);
+    const resolved = path.resolve(scenarioDirectory, relative);
+    const local = path.relative(scenarioDirectory, resolved);
+    if (!local || local.startsWith('..') || path.isAbsolute(local) || !fs.existsSync(resolved)) {
+      throw new Error(`${label} is unsafe or missing.`);
+    }
+    return resolved;
+  };
+  for (const entry of fs.readdirSync(scenarioRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const scenarioDirectory = path.join(scenarioRoot, entry.name);
+    const scenarioReportPath = path.join(scenarioDirectory, 'report.json');
+    if (!fs.existsSync(scenarioReportPath)) continue;
+    let scenarioReport;
+    try {
+      scenarioReport = readJson(scenarioReportPath);
+    } catch (error) {
+      addIssue('error', 'scenario-effect-report-invalid', `Could not read ${entry.name} effect evidence: ${error.message}`, 'Recapture the complete scenario evidence.', { scenario: entry.name }, 25);
+      continue;
+    }
+    for (const capture of Array.isArray(scenarioReport.captures) ? scenarioReport.captures : []) {
+      if (capture?.captureKind !== 'desktop-compositor' || capture?.releaseEligible !== true) continue;
+      const visibleEffects = [...(capture.droppings || []), ...(capture.effects || [])].filter((item) => item?.visible !== false);
+      if (!visibleEffects.length) continue;
+      try {
+        const composition = resolveEvidence(scenarioDirectory, capture.composition, 'composition image');
+        const underlay = resolveEvidence(scenarioDirectory, capture.effectUnderlay, 'effect underlay image');
+        const compositionBounds = capture.compositionBounds;
+        if (!compositionBounds || ![compositionBounds.x, compositionBounds.y, compositionBounds.width, compositionBounds.height].every(Number.isFinite)) {
+          throw new Error('composition bounds are missing or invalid.');
+        }
+        const [desktopRaw, underlayRaw] = await Promise.all([
+          sharp(composition).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
+          sharp(underlay).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+        ]);
+        for (const item of visibleEffects) {
+          const effectFile = resolveEvidence(scenarioDirectory, item.file, 'effect window image');
+          const effectRaw = await sharp(effectFile).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+          const metrics = effectEvidenceMetrics(effectRaw, desktopRaw, underlayRaw, item.bounds, compositionBounds);
+          const failed = metrics.transparentUnderlayMatchRatio < 0.94
+            || metrics.edgeTransparentUnderlayMatchRatio < 0.94
+            || metrics.cornerTransparentUnderlayMatchRatio < 0.94
+            || metrics.transparentNeutralArtifactRatio > 0.01
+            || metrics.visibleNeutralPixelRatio > 0.03
+            || metrics.visiblePalePixelRatio > 0.005
+            || metrics.visibleCompositorChangeRatio < 0.1;
+          const metricKeys = Object.keys(metrics);
+          const stale = metricKeys.some((key) => !Number.isFinite(item[key]) || Math.abs(item[key] - metrics[key]) > 0.03);
+          if (failed) {
+            addIssue(
+              'error',
+              'scenario-effect-compositor-artifact',
+              `${entry.name} ${capture.label || 'active'} contains an opaque box, white/gray rim, halo, or transparent-area compositor mismatch.`,
+              'Fix the effect window transparency, recapture on the controlled light/dark surface, and verify the matching effect underlay.',
+              { scenario: entry.name, capture: capture.label || 'active', effect: item.id || item.role || 'poop', metrics },
+              25
+            );
+          } else if (stale) {
+            addIssue(
+              'error',
+              'scenario-effect-metrics-stale',
+              `${entry.name} ${capture.label || 'active'} effect metrics do not match the current PNG evidence.`,
+              'Regenerate the scenario report from the current packaged candidate; do not edit metric JSON by hand.',
+              { scenario: entry.name, capture: capture.label || 'active', effect: item.id || item.role || 'poop', reported: Object.fromEntries(metricKeys.map((key) => [key, item[key]])), recomputed: metrics },
+              25
+            );
+          }
+        }
+      } catch (error) {
+        addIssue(
+          'error',
+          'scenario-effect-underlay-invalid',
+          `${entry.name} ${capture.label || 'active'} cannot prove compositor transparency: ${error.message}`,
+          'Recapture the scenario so every visible poop has a same-frame effect-underlay.png and current effect-window PNG.',
+          { scenario: entry.name, capture: capture.label || 'active' },
+          25
+        );
+      }
+    }
+  }
+}
+
 async function validateGenerationManifest() {
   if (!fs.existsSync(generationManifestPath)) return null;
   const data = readJson(generationManifestPath);
@@ -1310,6 +1480,8 @@ if (runtimePath) {
     }
   }
 }
+
+await validateScenarioEffectEvidence();
 
 const identityFingerprint = fileHash(identityBoardPath);
 const contactSheetFingerprint = fileHash(contactSheetPath);

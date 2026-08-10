@@ -113,6 +113,22 @@ class BehaviorEngine {
     };
   }
 
+  isSelectedSelf(petOrId) {
+    const id = typeof petOrId === 'string' ? petOrId : petOrId?.id;
+    const selectedSelfId = this.config.selection?.userCharacterId;
+    return Boolean(selectedSelfId) && id === selectedSelfId;
+  }
+
+  idleAction(pet) {
+    return pet.direction === 'left' ? 'idle_left' : 'idle_right';
+  }
+
+  freeRoamAction(pet) {
+    return this.isSelectedSelf(pet)
+      ? this.idleAction(pet)
+      : (pet.direction === 'left' ? 'crawl_left' : 'crawl_right');
+  }
+
   windowPadding() {
     const size = this.config.render.spriteSize;
     const windowSize = this.config.render.windowSize;
@@ -156,7 +172,7 @@ class BehaviorEngine {
       vx: direction * speed,
       vy: this.randomBetween(-10, 10),
       direction: direction > 0 ? 'right' : 'left',
-      action: direction > 0 ? 'crawl_right' : 'crawl_left',
+      action: this.freeRoamAction({ id: character.id, direction: direction > 0 ? 'right' : 'left' }),
       frame: 0,
       phrase: '',
       phraseUntil: 0,
@@ -212,6 +228,7 @@ class BehaviorEngine {
     if (!finite(pet.effectSize)) pet.effectSize = this.config.render.effectSize;
     if (pet.direction !== 'left' && pet.direction !== 'right') pet.direction = pet.vx < 0 ? 'left' : 'right';
     if (typeof pet.action !== 'string' || !pet.action) pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
+    if (this.isSelectedSelf(pet) && /^(?:crawl|centipede)_/.test(pet.action)) pet.action = this.idleAction(pet);
   }
 
   sanitizeState() {
@@ -364,14 +381,24 @@ class BehaviorEngine {
 
   setDragging(id, dragging, position) {
     const pet = this.pets.find((item) => item.id === id);
-    if (!pet || this.mode === 'centipede' || this.mode === 'poopChase') return;
+    if (!pet || this.mode === 'centipede') return;
+    const selfPoopDrag = this.mode === 'poopChase' &&
+      this.config.selection?.userCharacterId === id &&
+      this.poopChaseParticipants().hasUser &&
+      !this.formationTransition;
+    if (this.mode === 'poopChase' && !selfPoopDrag) return;
     pet.dragging = dragging;
     if (position) {
-      pet.x = position.x;
-      pet.y = position.y;
-      this.clampPet(pet);
+      if (selfPoopDrag) this.repositionPoopChaseFormation(pet, position);
+      else {
+        pet.x = position.x;
+        pet.y = position.y;
+        this.clampPet(pet);
+      }
     }
-    pet.action = dragging ? 'drag' : (pet.direction === 'right' ? 'idle_right' : 'idle_left');
+    pet.action = selfPoopDrag
+      ? `poop_${pet.direction}`
+      : (dragging ? 'drag' : (pet.direction === 'right' ? 'idle_right' : 'idle_left'));
   }
 
   interruptFormation() {
@@ -535,9 +562,7 @@ class BehaviorEngine {
     const deltaX = target.x - pet.x;
     const arrived = this.moveActorToward(pet, target, dt, { maxSpeed: Math.min(gatherSpeed, this.motionSettings().maxSpeed) });
     if (Math.abs(deltaX) >= 0.01) pet.direction = deltaX > 0 ? 'right' : 'left';
-    pet.action = standing
-      ? (pet.direction === 'right' ? 'idle_right' : 'idle_left')
-      : (pet.direction === 'right' ? 'crawl_right' : 'crawl_left');
+    pet.action = standing ? this.idleAction(pet) : this.freeRoamAction(pet);
     pet.frame = 0;
     pet.phrase = '';
     pet.phraseUntil = 0;
@@ -774,8 +799,9 @@ class BehaviorEngine {
       if (fixedPoopDirection) pet.direction = target.direction === 'left' ? 'left' : 'right';
       else if (Math.abs(deltaX) >= 0.01) pet.direction = deltaX > 0 ? 'right' : 'left';
       if (!this.moveActorToward(pet, target, dt)) allArrived = false;
-      if (transition.kind === 'shout-recipient') pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
-      else pet.action = pet.direction === 'right' ? 'crawl_right' : 'crawl_left';
+      if (transition.kind === 'self-poop' && this.isSelectedSelf(pet)) pet.action = `poop_${pet.direction}`;
+      else if (transition.kind === 'shout-recipient') pet.action = this.idleAction(pet);
+      else pet.action = this.freeRoamAction(pet);
       pet.frame = 0;
       pet.effect = '';
       pet.dragging = false;
@@ -857,7 +883,9 @@ class BehaviorEngine {
 
     this.clearFormation();
     const size = this.config.render.spriteSize;
-    const target = this.safePoint(cursor, { x: leader.x + size / 2, y: leader.y + size / 2 });
+    const target = hasUser
+      ? { x: leader.x + size / 2, y: leader.y + size / 2 }
+      : this.safePoint(cursor, { x: leader.x + size / 2, y: leader.y + size / 2 });
     const display = this.getDisplayForPoint(target);
     const formation = this.poopChaseRowTargets(participants, settings, display);
     if (formation.skippedReason) return this.mode;
@@ -889,6 +917,33 @@ class BehaviorEngine {
       Object.assign(pet, target, { vx: 0, vy: 0, dragging: false });
     }
     return formation;
+  }
+
+  repositionPoopChaseFormation(leader, position) {
+    const { participants, hasUser } = this.poopChaseParticipants();
+    if (!hasUser || participants[0]?.id !== leader.id || this.formationTransition) return false;
+    const size = this.config.render.spriteSize;
+    const requested = {
+      x: finite(position?.x) ? position.x : leader.x,
+      y: finite(position?.y) ? position.y : leader.y
+    };
+    const display = this.getDisplayForPoint({ x: requested.x + size / 2, y: requested.y + size / 2 });
+    const target = this.clampLeaderForConnectedFormation(requested, participants, display, 'poopChase');
+    const dx = target.x - leader.x;
+    const dy = target.y - leader.y;
+    for (const pet of participants) {
+      pet.x += dx;
+      pet.y += dy;
+      pet.vx = 0;
+      pet.vy = 0;
+    }
+    for (const dropping of this.droppings) {
+      dropping.x += dx;
+      dropping.y += dy;
+      dropping.vx = 0;
+      dropping.vy = 0;
+    }
+    return true;
   }
 
   poopChaseRowTargets(participants, settings, display = null) {
@@ -962,7 +1017,7 @@ class BehaviorEngine {
         this.moveActorToward(pet, this.nearestWorkAreaTarget(pet), dt);
         const movedX = pet.x - previousX;
         if (Math.abs(movedX) >= 0.25) pet.direction = movedX > 0 ? 'right' : 'left';
-        pet.action = pet.direction === 'right' ? 'crawl_right' : 'crawl_left';
+        pet.action = this.freeRoamAction(pet);
         return;
       }
       if (shouldTurn && this.random() < 0.35) {
@@ -980,7 +1035,7 @@ class BehaviorEngine {
       pet.x = clamp(pet.x, minX, maxX);
       pet.y = clamp(pet.y, minY, maxY);
       pet.direction = pet.vx >= 0 ? 'right' : 'left';
-      pet.action = pet.direction === 'right' ? 'crawl_right' : 'crawl_left';
+      pet.action = this.freeRoamAction(pet);
     });
   }
 
@@ -1159,7 +1214,8 @@ class BehaviorEngine {
       const cursorSettings = {
         ...this.behaviors.centipede,
         maxSpeed: Math.min(settings.maxSpeed || this.behaviors.centipede.maxSpeed, this.behaviors.centipede.maxSpeed),
-        maxAcceleration: settings.maxAcceleration || this.behaviors.centipede.maxAcceleration
+        maxAcceleration: settings.maxAcceleration || this.behaviors.centipede.maxAcceleration,
+        deadZone: settings.deadZone || 0
       };
       this.updatePoopChaseParticipants(participants, dt, cursorPoop, cursorSettings);
       for (let index = 0; index < participants.length; index += 1) {
@@ -1187,7 +1243,10 @@ class BehaviorEngine {
       this.poopRelay.phaseUntil = this.elapsed + Math.max(0, settings.initialDropDelayMs || settings.dropVisibleBeforeEatMs || 0) / 1000;
       this.poopRelay.lastUpdatedAt = this.elapsed;
     }
-    this.updatePoopChaseParticipants(participants, dt, cursor, settings);
+    for (const pet of participants) {
+      pet.vx = 0;
+      pet.vy = 0;
+    }
 
     const participantIds = new Set([leader.id, ...followers.map((pet) => pet.id)]);
     for (const pet of this.pets) {
@@ -1206,12 +1265,12 @@ class BehaviorEngine {
         (relay?.phase === 'sourceHold' || relay?.phase === 'travelling');
       if (relay?.fixedSource && pet.id === activeSource?.id) pet.action = `poop_${pet.direction}`;
       else if (eating || pet.id === nextEater?.id) pet.action = `eat_${pet.direction}`;
-      else pet.action = `crawl_${pet.direction}`;
+      else pet.action = this.freeRoamAction(pet);
       pet.effect = eating && this.behaviors.prankEffects.enabled ? 'stink' : '';
       pet.effectSize = eating ? settings.stinkSize : this.config.render.effectSize;
       pet.phrase = eating ? '啊呜！' : waitingToEat ? '下一个！' : '';
       pet.phraseUntil = eating ? pet.eatUntil : 0;
-      pet.dragging = false;
+      if (pet.id !== leader.id) pet.dragging = false;
     }
   }
 

@@ -47,6 +47,8 @@ const {
   desktopForegroundRatio,
   desktopPixelMatchRatio,
   desktopSurfaceMatchRatio,
+  effectCompositorMetrics,
+  imageTransparencyMetrics,
   fitCaptureToLogicalBounds,
   fixedWindowBoundsNeedRepair,
   groupShoutEvidenceLayout,
@@ -263,24 +265,24 @@ function validationSurfaceHtml(label) {
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; script-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'">
   <style>
-    :root { color-scheme: light; font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    :root { color-scheme: light dark; font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif; }
     * { box-sizing: border-box; }
     html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
     body {
       position: relative;
       color: #53616d;
-      background:
-        radial-gradient(circle at 28% 20%, rgba(255,255,255,.98), rgba(255,255,255,0) 42%),
-        linear-gradient(145deg, #eef3f6 0%, #e7edf1 58%, #dfe7eb 100%);
+      background: linear-gradient(90deg, #eef3f6 0 50%, #46515b 50% 100%);
     }
     .tag { position: absolute; top: 24px; left: 28px; padding: 8px 12px; border: 1px solid rgba(62, 83, 99, .14); border-radius: 999px; background: rgba(255,255,255,.78); font-size: 13px; font-weight: 650; }
     .context { position: absolute; left: 30px; bottom: 24px; color: #778792; font-size: 12px; }
-    .mode { position: absolute; right: 28px; bottom: 24px; color: #81909a; font-size: 12px; }
+    .edge-note { position: absolute; left: calc(50% + 20px); top: 24px; color: #f2f5f7; font-size: 12px; font-weight: 650; }
+    .mode { position: absolute; right: 28px; bottom: 24px; color: #f2f5f7; font-size: 12px; }
   </style>
 </head>
 <body>
   <div class="tag">内部验收画布 · 非产品界面</div>
-  <div class="context">受控脱敏背景，不含用户桌面内容</div>
+  <div class="context">左侧浅色：检查黑边；右侧深色：检查白边与灰边</div>
+  <div class="edge-note">深色边缘验收区</div>
   <div class="mode">${safeLabel}</div>
 </body>
 </html>`;
@@ -347,6 +349,7 @@ function createEffectWindow(asset, size) {
     height: size,
     frame: false,
     transparent: true,
+    backgroundColor: '#00000000',
     resizable: false,
     show: false,
     skipTaskbar: true,
@@ -354,6 +357,7 @@ function createEffectWindow(asset, size) {
     hasShadow: false,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, webviewTag: false }
   });
+  win.setBackgroundColor('#00000000');
   hardenWebContents(win.webContents, EFFECT_PAGE);
   win.setAlwaysOnTop(true, 'floating');
   if (process.platform === 'darwin') win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
@@ -578,7 +582,7 @@ function stageProductEvidenceLayout(display) {
     pet.vx = motion.vx;
     pet.vy = motion.vy;
     pet.direction = direction;
-    pet.action = direction === 'right' ? 'crawl_right' : 'crawl_left';
+    pet.action = engine.freeRoamAction(pet);
     pet.frame = 0;
     pet.phrase = '';
     pet.phraseUntil = 0;
@@ -761,6 +765,7 @@ function startScenarioTest() {
     captures: [],
     capturedLabels: new Set(),
     capturePromises: [],
+    captureQueue: Promise.resolve(),
     captureInProgress: false,
     lastPoopTargetId: scenario === 'poop-chase' ? engine.droppings[0]?.targetId || null : null
   };
@@ -865,24 +870,29 @@ function recordScenarioSample(snapshot, cursor) {
 
 function requestScenarioCapture(label, expectedPhase = null, evidence = null) {
   if (!scenarioTest || !process.env.PET_SCENARIO_CAPTURE_DIR) return;
+  const currentScenario = scenarioTest;
   const key = label || 'active';
-  if (scenarioTest.capturedLabels.has(key)) return;
+  if (currentScenario.capturedLabels.has(key)) return;
   const outputDir = process.env.PET_SCENARIO_CAPTURE_DIR;
   const errorFile = path.join(outputDir, `capture-${key}-error.txt`);
-  scenarioTest.capturedLabels.add(key);
-  scenarioTest.captureInProgress = true;
-  const promise = new Promise((resolve) => setTimeout(resolve, 80))
+  currentScenario.capturedLabels.add(key);
+  currentScenario.captureInProgress = true;
+  const previousCapture = currentScenario.captureQueue || Promise.resolve();
+  const promise = previousCapture
+    .catch(() => {})
+    .then(() => new Promise((resolve) => setTimeout(resolve, 80)))
     .then(() => captureScenarioWindows(label, expectedPhase, evidence))
     .then(() => fs.rmSync(errorFile, { force: true }))
     .catch((error) => {
-      scenarioTest?.capturedLabels.delete(key);
+      currentScenario.capturedLabels.delete(key);
       fs.mkdirSync(outputDir, { recursive: true });
       fs.writeFileSync(errorFile, `${publicErrorMessage(error)}\n`, 'utf8');
     })
     .finally(() => {
-      if (scenarioTest) scenarioTest.captureInProgress = false;
+      if (currentScenario.captureQueue === promise) currentScenario.captureInProgress = false;
     });
-  scenarioTest.capturePromises.push(promise);
+  currentScenario.captureQueue = promise;
+  currentScenario.capturePromises.push(promise);
 }
 
 function captureScenarioMilestone(snapshot) {
@@ -1177,7 +1187,8 @@ async function captureScenarioWindows(label = null, expectedPhase = null, eviden
       id,
       file: path.relative(outputDir, fullPath).split(path.sep).join('/'),
       bounds,
-      visible: win.isVisible()
+      visible: win.isVisible(),
+      ...imageTransparencyMetrics(image)
     };
     droppings.push(dropping);
     droppingImages.push({ dropping, image, bounds });
@@ -1193,7 +1204,8 @@ async function captureScenarioWindows(label = null, expectedPhase = null, eviden
       role: 'cursor-poop',
       file: path.relative(outputDir, fullPath).split(path.sep).join('/'),
       bounds,
-      visible: cursorPoopWindow.isVisible()
+      visible: cursorPoopWindow.isVisible(),
+      ...imageTransparencyMetrics(image)
     };
     effects.push(effect);
     effectImages.push({ effect, image, bounds });
@@ -1210,6 +1222,8 @@ async function captureScenarioWindows(label = null, expectedPhase = null, eviden
   let composition;
   let capturePolicy;
   let surfaceMatchRatio = null;
+  let effectUnderlay = null;
+  let effectUnderlayFile = null;
   const compositionBounds = { ...scenarioTest.workArea };
   try {
     composition = await captureDesktopWithPets(scenarioTest.display, scenarioTest.workArea);
@@ -1230,6 +1244,23 @@ async function captureScenarioWindows(label = null, expectedPhase = null, eviden
   }
   if (capturePolicy.releaseEligible) {
     const desktopImage = nativeImage.createFromBuffer(composition);
+    if (droppingImages.length || effectImages.length) {
+      const visibleEffectWindows = [
+        ...droppingWindows.values(),
+        cursorPoopWindow
+      ].filter((win) => win && !win.isDestroyed() && win.isVisible());
+      try {
+        for (const win of visibleEffectWindows) win.hide();
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        effectUnderlay = await captureDesktopWithPets(scenarioTest.display, scenarioTest.workArea);
+      } finally {
+        for (const win of visibleEffectWindows) presentAlwaysOnTopWindow(win, true);
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      const effectUnderlayPath = path.join(captureDir, 'effect-underlay.png');
+      fs.writeFileSync(effectUnderlayPath, effectUnderlay);
+      effectUnderlayFile = path.relative(outputDir, effectUnderlayPath).split(path.sep).join('/');
+    }
     const surfaceImage = await validationWindow.webContents.capturePage();
     surfaceMatchRatio = Number(desktopSurfaceMatchRatio(
       surfaceImage,
@@ -1255,20 +1286,45 @@ async function captureScenarioWindows(label = null, expectedPhase = null, eviden
         scenarioTest.workArea
       ).toFixed(4));
     }
-    for (const item of effectImages) {
-      item.effect.desktopForegroundRatio = Number(desktopForegroundRatio(
+    for (const item of [...droppingImages, ...effectImages]) {
+      const evidence = item.dropping || item.effect;
+      evidence.desktopForegroundRatio = Number(desktopForegroundRatio(
         item.bounds,
         desktopImage,
         surfaceImage,
         validationWindow.getBounds(),
         scenarioTest.workArea
       ).toFixed(4));
-      item.effect.desktopMatchRatio = Number(desktopPixelMatchRatio(
+      evidence.desktopMatchRatio = Number(desktopPixelMatchRatio(
         item.image,
         item.bounds,
         desktopImage,
         scenarioTest.workArea
       ).toFixed(4));
+      Object.assign(evidence, effectCompositorMetrics(
+        item.image,
+        item.bounds,
+        desktopImage,
+        nativeImage.createFromBuffer(effectUnderlay),
+        scenarioTest.workArea
+      ));
+    }
+    const invalidPoopTransparency = [...droppings, ...effects].filter((item) => (
+      item.visible && (
+        item.transparentPixelRatio < 0.15 ||
+        item.visiblePixelRatio > 0.78 ||
+        item.desktopForegroundRatio > 0.78 ||
+        item.transparentUnderlayMatchRatio < 0.94 ||
+        item.edgeTransparentUnderlayMatchRatio < 0.94 ||
+        item.cornerTransparentUnderlayMatchRatio < 0.94 ||
+        item.transparentNeutralArtifactRatio > 0.01 ||
+        item.visibleNeutralPixelRatio > 0.03 ||
+        item.visiblePalePixelRatio > 0.005 ||
+        item.visibleCompositorChangeRatio < 0.1
+      )
+    ));
+    if (invalidPoopTransparency.length) {
+      throw new Error(`Poop transparency failed: ${invalidPoopTransparency.map((item) => item.id || item.role).join(', ')} rendered an opaque box, white border, gray halo, or oversized background.`);
     }
     if (scenarioTest.scenario === 'centipede') {
       const cursorPoop = effects.find((effect) => effect.role === 'cursor-poop');
@@ -1293,6 +1349,7 @@ async function captureScenarioWindows(label = null, expectedPhase = null, eviden
     captureKind: capturePolicy.captureKind,
     releaseEligible: capturePolicy.releaseEligible,
     surfaceMatchRatio,
+    effectUnderlay: effectUnderlayFile,
     compositionBounds: compositionBounds,
     evidence: evidence,
     frames,
@@ -1320,6 +1377,9 @@ function waitForPerformance(milliseconds) {
 
 function performanceCursor() {
   if (!performanceAudit || !['centipede', 'poop-chase'].includes(performanceAudit.cursorMode)) return null;
+  if (performanceAudit.cursorMode === 'poop-chase' && config.selection?.userCharacterId) {
+    return performanceCenterCursor();
+  }
   const workArea = screen.getPrimaryDisplay().workArea;
   const elapsed = (nodePerformance.now() - performanceAudit.cursorStartedAt) / 1000;
   return {
@@ -1443,12 +1503,27 @@ function performanceCenterCursor() {
   return { x: workArea.x + workArea.width / 2, y: workArea.y + workArea.height / 2 };
 }
 
+const PERFORMANCE_REPORT_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const performanceReportRetryCell = new Int32Array(new SharedArrayBuffer(4));
+
+function replacePerformanceReportFile(temporary, output) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      fs.rmSync(output, { force: true });
+      fs.renameSync(temporary, output);
+      return;
+    } catch (error) {
+      if (!PERFORMANCE_REPORT_RETRY_CODES.has(error?.code) || attempt === 7) throw error;
+      Atomics.wait(performanceReportRetryCell, 0, 0, 25 * (attempt + 1));
+    }
+  }
+}
+
 function writePerformanceJson(report) {
   fs.mkdirSync(path.dirname(performanceAudit.output), { recursive: true });
   const temporary = `${performanceAudit.output}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-  fs.rmSync(performanceAudit.output, { force: true });
-  fs.renameSync(temporary, performanceAudit.output);
+  replacePerformanceReportFile(temporary, performanceAudit.output);
 }
 
 function performanceReportBase(status) {
@@ -1819,7 +1894,10 @@ function installIpc() {
     if (!authorized) return;
     const { id } = authorized;
     const pet = engine.pets.find((item) => item.id === id);
-    if (!pet || engine.mode === 'centipede' || engine.mode === 'poopChase') return;
+    const selfPoopDrag = engine.mode === 'poopChase' &&
+      id === config.selection?.userCharacterId &&
+      !engine.formationTransition;
+    if (!pet || engine.mode === 'centipede' || (engine.mode === 'poopChase' && !selfPoopDrag)) return;
     dragStates.set(id, { cursorStart: screen.getCursorScreenPoint(), petStart: { x: pet.x, y: pet.y } });
     engine.setDragging(id, true);
   });

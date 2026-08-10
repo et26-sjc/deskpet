@@ -18,6 +18,8 @@ const {
   desktopForegroundRatio,
   desktopPixelMatchRatio,
   desktopSurfaceMatchRatio,
+  effectCompositorMetrics,
+  imageTransparencyMetrics,
   fitCaptureToLogicalBounds,
   fixedWindowBoundsNeedRepair,
   groupShoutEvidenceLayout,
@@ -498,6 +500,86 @@ test('desktop evidence detects real foreground inside a pet window without depen
   assert.equal(desktopForegroundRatio(bounds, image(surfacePixels), image(surfacePixels), workArea, workArea), 0);
 });
 
+test('effect transparency metrics reject an opaque square and retain transparent silhouette evidence', () => {
+  const image = (pixels) => ({
+    getSize: () => ({ width: 2, height: 2 }),
+    toBitmap: () => Buffer.from(pixels)
+  });
+  const opaqueSquare = image([
+    255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255
+  ]);
+  const transparentShape = image([
+    0, 0, 0, 0, 47, 71, 111, 255,
+    47, 71, 111, 128, 0, 0, 0, 0
+  ]);
+
+  assert.deepEqual(imageTransparencyMetrics(opaqueSquare), {
+    transparentPixelRatio: 0,
+    visiblePixelRatio: 1,
+    partialAlphaPixelRatio: 0
+  });
+  assert.deepEqual(imageTransparencyMetrics(transparentShape), {
+    transparentPixelRatio: 0.5,
+    visiblePixelRatio: 0.5,
+    partialAlphaPixelRatio: 0.25
+  });
+});
+
+test('effect compositor metrics reject a real white box and a baked white rim against the captured underlay', () => {
+  const width = 6;
+  const height = 6;
+  const image = (pixels) => ({
+    getSize: () => ({ width, height }),
+    toBitmap: () => Buffer.from(pixels)
+  });
+  const pixel = (blue, green, red, alpha = 255) => [blue, green, red, alpha];
+  const underlayPixels = Array.from({ length: width * height }, () => pixel(28, 42, 64)).flat();
+  const cleanEffectPixels = [];
+  const cleanDesktopPixels = [...underlayPixels];
+  const whiteBoxDesktopPixels = [];
+  const rimEffectPixels = [];
+  const rimDesktopPixels = [...underlayPixels];
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const center = x >= 2 && x <= 3 && y >= 2 && y <= 3;
+      const rim = x >= 1 && x <= 4 && y >= 1 && y <= 4 && !center;
+      cleanEffectPixels.push(...(center ? pixel(24, 66, 118) : pixel(0, 0, 0, 0)));
+      whiteBoxDesktopPixels.push(...(center ? pixel(24, 66, 118) : pixel(255, 255, 255)));
+      rimEffectPixels.push(...(center ? pixel(24, 66, 118) : rim ? pixel(255, 255, 255) : pixel(0, 0, 0, 0)));
+      const offset = (y * width + x) * 4;
+      if (center) cleanDesktopPixels.splice(offset, 4, ...pixel(24, 66, 118));
+      if (center) rimDesktopPixels.splice(offset, 4, ...pixel(24, 66, 118));
+      else if (rim) rimDesktopPixels.splice(offset, 4, ...pixel(255, 255, 255));
+    }
+  }
+  const bounds = { x: 0, y: 0, width, height };
+  const workArea = { x: 0, y: 0, width, height };
+  const clean = effectCompositorMetrics(
+    image(cleanEffectPixels), bounds, image(cleanDesktopPixels), image(underlayPixels), workArea
+  );
+  assert.equal(clean.transparentUnderlayMatchRatio, 1);
+  assert.equal(clean.edgeTransparentUnderlayMatchRatio, 1);
+  assert.equal(clean.cornerTransparentUnderlayMatchRatio, 1);
+  assert.equal(clean.transparentNeutralArtifactRatio, 0);
+  assert.equal(clean.visibleNeutralPixelRatio, 0);
+  assert.equal(clean.visiblePalePixelRatio, 0);
+  assert.equal(clean.visibleCompositorChangeRatio, 1);
+
+  const whiteBox = effectCompositorMetrics(
+    image(cleanEffectPixels), bounds, image(whiteBoxDesktopPixels), image(underlayPixels), workArea
+  );
+  assert.ok(whiteBox.transparentUnderlayMatchRatio < 0.1);
+  assert.ok(whiteBox.edgeTransparentUnderlayMatchRatio < 0.1);
+  assert.ok(whiteBox.transparentNeutralArtifactRatio > 0.9);
+
+  const whiteRim = effectCompositorMetrics(
+    image(rimEffectPixels), bounds, image(rimDesktopPixels), image(underlayPixels), workArea
+  );
+  assert.ok(whiteRim.visibleNeutralPixelRatio > 0.5);
+  assert.ok(whiteRim.visiblePalePixelRatio > 0.5);
+});
+
 test('cursor effect keeps its normal offset when it does not cover a pet', () => {
   const bounds = cursorEffectBounds(
     { x: 900, y: 400 },
@@ -542,6 +624,8 @@ test('adaptive cursor-poop effect windows are click-through and follow the real 
   const tickerSource = mainSource.slice(mainSource.indexOf('function scheduleTicker'), mainSource.indexOf('function registerIpc'));
 
   assert.match(effectSource, /setIgnoreMouseEvents\(true/);
+  assert.match(effectSource, /backgroundColor:\s*'#00000000'/);
+  assert.match(effectSource, /setBackgroundColor\('#00000000'\)/);
   assert.match(tickerSource, /cursorControlled/);
   assert.match(tickerSource, /cursorEffectBounds\(\s*cursor/);
 });
@@ -656,6 +740,8 @@ test('runtime product evidence uses a controlled private validation surface and 
   assert.match(mainSource, /focusable:\s*false/);
   assert.match(mainSource, /skipTaskbar:\s*true/);
   assert.match(mainSource, /setIgnoreMouseEvents\(true/);
+  assert.match(mainSource, /linear-gradient\(90deg,\s*#eef3f6\s+0\s+50%,\s*#46515b\s+50%\s+100%\)/);
+  assert.match(mainSource, /edge-note/);
   assert.match(mainSource, /内部验收画布/);
   assert.match(mainSource, /非产品界面/);
   assert.doesNotMatch(mainSource, /RUNTIME VALIDATION SURFACE/);
@@ -740,6 +826,8 @@ test('scenario-only eight-person self-poop staging completes the evidence row be
   assert.ok(arrangeIndex >= 0, 'self-poop evidence must deterministically stage every participant inside the work area');
   assert.ok(toggleIndex > arrangeIndex, 'the relay must start only after the evidence row is staged');
   assert.match(scenarioSource, /engine\.arrangePoopChaseRow\(poopParticipants\.participants, poopParticipants\.settings, primary\)/);
+  assert.match(scenarioSource, /const scenarioTravel\s*=\s*Math\.min\(280, primary\.workArea\.width \* 0\.24\)/);
+  assert.doesNotMatch(scenarioSource, /if \(selfPoopScenario\) targetCursor/);
 });
 
 test('no-self centipede capture fails closed unless cursor poop is visible in the compositor', () => {
@@ -749,33 +837,55 @@ test('no-self centipede capture fails closed unless cursor poop is visible in th
     mainSource.indexOf('function performanceDuration')
   );
 
-  assert.match(captureSource, /for \(const item of effectImages\)[\s\S]*desktopForegroundRatio\(/);
-  assert.match(captureSource, /for \(const item of effectImages\)[\s\S]*desktopPixelMatchRatio\(/);
+  assert.match(captureSource, /for \(const item of \[\.\.\.droppingImages, \.\.\.effectImages\]\)[\s\S]*desktopForegroundRatio\(/);
+  assert.match(captureSource, /for \(const item of \[\.\.\.droppingImages, \.\.\.effectImages\]\)[\s\S]*desktopPixelMatchRatio\(/);
   assert.match(captureSource, /scenarioTest\.scenario\s*===\s*'centipede'[\s\S]*cursor-poop[\s\S]*Desktop compositor omitted visible cursor poop/);
 });
 
-test('scenario milestone capture freezes the ticker until the labeled compositor frame is complete', () => {
+test('every poop capture fails closed on an opaque box, white border, gray halo, or oversized background', () => {
+  const captureSource = mainSource.slice(mainSource.indexOf('async function captureScenarioWindows'), mainSource.indexOf('function performanceDuration'));
+
+  assert.match(captureSource, /dropping[\s\S]*imageTransparencyMetrics\(image\)/);
+  assert.match(captureSource, /cursor-poop[\s\S]*imageTransparencyMetrics\(image\)/);
+  assert.match(captureSource, /transparentPixelRatio\s*<\s*0\.15/);
+  assert.match(captureSource, /visiblePixelRatio\s*>\s*0\.78/);
+  assert.match(captureSource, /desktopForegroundRatio\s*>\s*0\.78/);
+  assert.match(captureSource, /transparentUnderlayMatchRatio\s*<\s*0\.94/);
+  assert.match(captureSource, /edgeTransparentUnderlayMatchRatio\s*<\s*0\.94/);
+  assert.match(captureSource, /cornerTransparentUnderlayMatchRatio\s*<\s*0\.94/);
+  assert.match(captureSource, /transparentNeutralArtifactRatio\s*>\s*0\.01/);
+  assert.match(captureSource, /visibleNeutralPixelRatio\s*>\s*0\.03/);
+  assert.match(captureSource, /visiblePalePixelRatio\s*>\s*0\.005/);
+  assert.match(captureSource, /effect-underlay\.png/);
+  assert.match(captureSource, /Poop transparency failed/);
+});
+
+test('scenario milestone captures are serialized while the ticker stays frozen', () => {
   const mainSource = fs.readFileSync(fileURLToPath(new URL('../src/main.js', import.meta.url)), 'utf8');
   const requestSource = mainSource.slice(mainSource.indexOf('function requestScenarioCapture'), mainSource.indexOf('function captureScenarioMilestone'));
   const tickerSource = mainSource.slice(mainSource.indexOf('function runTickerFrame'), mainSource.indexOf('function startTicker'));
 
-  assert.match(requestSource, /scenarioTest\.captureInProgress\s*=\s*true/);
+  assert.match(requestSource, /currentScenario\.captureInProgress\s*=\s*true/);
+  assert.match(requestSource, /const previousCapture\s*=\s*currentScenario\.captureQueue\s*\|\|\s*Promise\.resolve\(\)/);
+  assert.match(requestSource, /previousCapture[\s\S]*captureScenarioWindows\(label,\s*expectedPhase,\s*evidence\)/);
+  assert.match(requestSource, /currentScenario\.captureQueue\s*=\s*promise/);
   assert.match(requestSource, /captureScenarioWindows\(label,\s*expectedPhase,\s*evidence\)/);
-  assert.match(requestSource, /finally\([\s\S]*scenarioTest\.captureInProgress\s*=\s*false/);
+  assert.match(requestSource, /finally\([\s\S]*currentScenario\.captureQueue\s*===\s*promise[\s\S]*currentScenario\.captureInProgress\s*=\s*false/);
   assert.match(tickerSource, /if \(scenarioTest\?\.captureInProgress\)[\s\S]*scheduleTicker\(16\)[\s\S]*return/);
 });
 
-test('relay dropping visual avoids a heavy cartoon sticker outline', () => {
+test('relay dropping visual is a flat brown transparent shape with no baked highlight, outline, or CSS shadow', () => {
   const poopSvg = fs.readFileSync(fileURLToPath(new URL('../src/assets/effects/poop.svg', import.meta.url)), 'utf8');
   const effectCss = fs.readFileSync(fileURLToPath(new URL('../src/renderer/effect.css', import.meta.url)), 'utf8');
   const effectJs = fs.readFileSync(fileURLToPath(new URL('../src/renderer/effect.js', import.meta.url)), 'utf8');
 
-  assert.match(poopSvg, /radialGradient/);
-  assert.doesNotMatch(poopSvg, /stroke-width="[34]"/);
-  assert.doesNotMatch(poopSvg, /stroke="#33251f"/);
+  assert.match(poopSvg, /<path fill="#[0-9a-f]{6}" d=/i);
+  assert.equal((poopSvg.match(/<path\b/g) || []).length, 1);
+  assert.doesNotMatch(poopSvg, /(?:linear|radial)Gradient|<defs\b|\bstroke=|\bfilter=|\bopacity=/i);
   assert.match(effectJs, /document\.body\.dataset\.asset\s*=\s*asset/);
   assert.match(effectCss, /body\[data-asset="poop"\]\s+img/);
-  assert.doesNotMatch(effectCss, /body\[data-asset="poop"\][\s\S]*rgba\(255,\s*238,\s*185,\s*0\.95\)/);
+  assert.match(effectCss, /body\[data-asset="poop"\]\s+img\s*\{\s*filter:\s*none;\s*\}/);
+  assert.match(effectCss, /background:\s*rgba\(0,\s*0,\s*0,\s*0\)\s*!important/);
 });
 
 test('relay dropping remains readable without dominating the character scale', () => {

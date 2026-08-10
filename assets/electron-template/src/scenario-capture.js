@@ -62,6 +62,124 @@ function fitCaptureToLogicalBounds(image, bounds) {
   return image.resize({ width, height, quality: 'best' });
 }
 
+function imageTransparencyMetrics(image, alphaThreshold = 12) {
+  if (!image || typeof image.toBitmap !== 'function' || typeof image.getSize !== 'function') {
+    return { transparentPixelRatio: 0, visiblePixelRatio: 1, partialAlphaPixelRatio: 0 };
+  }
+  const size = image.getSize();
+  const bitmap = image.toBitmap();
+  const totalPixels = Math.max(1, Math.min(
+    Math.max(0, Math.round(Number(size.width) || 0)) * Math.max(0, Math.round(Number(size.height) || 0)),
+    Math.floor(bitmap.length / 4)
+  ));
+  const threshold = Math.max(0, Math.min(127, Math.round(Number(alphaThreshold) || 0)));
+  let transparentPixels = 0;
+  let partialAlphaPixels = 0;
+  for (let offset = 3, pixel = 0; pixel < totalPixels; offset += 4, pixel += 1) {
+    const alpha = bitmap[offset];
+    if (alpha <= threshold) transparentPixels += 1;
+    else if (alpha < 255 - threshold) partialAlphaPixels += 1;
+  }
+  return {
+    transparentPixelRatio: Number((transparentPixels / totalPixels).toFixed(6)),
+    visiblePixelRatio: Number(((totalPixels - transparentPixels) / totalPixels).toFixed(6)),
+    partialAlphaPixelRatio: Number((partialAlphaPixels / totalPixels).toFixed(6))
+  };
+}
+
+function effectCompositorMetrics(effectImage, bounds, desktopImage, underlayImage, workArea, alphaThreshold = 12) {
+  const empty = {
+    transparentUnderlayMatchRatio: 0,
+    edgeTransparentUnderlayMatchRatio: 0,
+    cornerTransparentUnderlayMatchRatio: 0,
+    transparentNeutralArtifactRatio: 1,
+    visibleNeutralPixelRatio: 1,
+    visiblePalePixelRatio: 1,
+    visibleCompositorChangeRatio: 0
+  };
+  if (!effectImage || !desktopImage || !underlayImage || !bounds || !workArea) return empty;
+  const effectSize = effectImage.getSize();
+  const desktopSize = desktopImage.getSize();
+  const underlaySize = underlayImage.getSize();
+  if (!effectSize.width || !effectSize.height || !desktopSize.width || !desktopSize.height
+    || desktopSize.width !== underlaySize.width || desktopSize.height !== underlaySize.height) return empty;
+  const effect = effectImage.toBitmap();
+  const desktop = desktopImage.toBitmap();
+  const underlay = underlayImage.toBitmap();
+  const threshold = Math.max(0, Math.min(127, Math.round(Number(alphaThreshold) || 0)));
+  const desktopScaleX = desktopSize.width / Math.max(1, workArea.width);
+  const desktopScaleY = desktopSize.height / Math.max(1, workArea.height);
+  const logicalScaleX = bounds.width / Math.max(1, effectSize.width);
+  const logicalScaleY = bounds.height / Math.max(1, effectSize.height);
+  const edgeBand = Math.max(1, Math.ceil(Math.min(effectSize.width, effectSize.height) * 0.12));
+  let transparentSamples = 0;
+  let transparentMatches = 0;
+  let edgeTransparentSamples = 0;
+  let edgeTransparentMatches = 0;
+  let cornerTransparentSamples = 0;
+  let cornerTransparentMatches = 0;
+  let transparentNeutralArtifacts = 0;
+  let visibleSamples = 0;
+  let visibleColorSamples = 0;
+  let visibleNeutralPixels = 0;
+  let visiblePalePixels = 0;
+  let visibleChangedPixels = 0;
+  for (let y = 0; y < effectSize.height; y += 1) {
+    for (let x = 0; x < effectSize.width; x += 1) {
+      const effectOffset = (y * effectSize.width + x) * 4;
+      const logicalX = bounds.x - workArea.x + (x + 0.5) * logicalScaleX;
+      const logicalY = bounds.y - workArea.y + (y + 0.5) * logicalScaleY;
+      const desktopX = Math.max(0, Math.min(desktopSize.width - 1, Math.floor(logicalX * desktopScaleX)));
+      const desktopY = Math.max(0, Math.min(desktopSize.height - 1, Math.floor(logicalY * desktopScaleY)));
+      const desktopOffset = (desktopY * desktopSize.width + desktopX) * 4;
+      const delta = Math.max(
+        Math.abs(desktop[desktopOffset] - underlay[desktopOffset]),
+        Math.abs(desktop[desktopOffset + 1] - underlay[desktopOffset + 1]),
+        Math.abs(desktop[desktopOffset + 2] - underlay[desktopOffset + 2])
+      );
+      const alpha = effect[effectOffset + 3];
+      const effectMax = Math.max(effect[effectOffset], effect[effectOffset + 1], effect[effectOffset + 2]);
+      const effectMin = Math.min(effect[effectOffset], effect[effectOffset + 1], effect[effectOffset + 2]);
+      const onHorizontalEdge = x < edgeBand || x >= effectSize.width - edgeBand;
+      const onVerticalEdge = y < edgeBand || y >= effectSize.height - edgeBand;
+      if (alpha <= threshold) {
+        transparentSamples += 1;
+        if (delta <= 36) transparentMatches += 1;
+        const onEdge = onHorizontalEdge || onVerticalEdge;
+        if (onEdge) {
+          edgeTransparentSamples += 1;
+          if (delta <= 36) edgeTransparentMatches += 1;
+        }
+        if (onHorizontalEdge && onVerticalEdge) {
+          cornerTransparentSamples += 1;
+          if (delta <= 36) cornerTransparentMatches += 1;
+        }
+        const desktopMax = Math.max(desktop[desktopOffset], desktop[desktopOffset + 1], desktop[desktopOffset + 2]);
+        const desktopMin = Math.min(desktop[desktopOffset], desktop[desktopOffset + 1], desktop[desktopOffset + 2]);
+        if (delta > 36 && desktopMax - desktopMin <= 24) transparentNeutralArtifacts += 1;
+      } else {
+        visibleSamples += 1;
+        if (alpha >= 96) {
+          visibleColorSamples += 1;
+          if (effectMax - effectMin <= 24) visibleNeutralPixels += 1;
+          if (effectMin >= 200) visiblePalePixels += 1;
+        }
+        if (delta > 18) visibleChangedPixels += 1;
+      }
+    }
+  }
+  const ratio = (value, total, emptyValue = 0) => total ? Number((value / total).toFixed(6)) : emptyValue;
+  return {
+    transparentUnderlayMatchRatio: ratio(transparentMatches, transparentSamples),
+    edgeTransparentUnderlayMatchRatio: ratio(edgeTransparentMatches, edgeTransparentSamples),
+    cornerTransparentUnderlayMatchRatio: ratio(cornerTransparentMatches, cornerTransparentSamples),
+    transparentNeutralArtifactRatio: ratio(transparentNeutralArtifacts, transparentSamples, 1),
+    visibleNeutralPixelRatio: ratio(visibleNeutralPixels, visibleColorSamples, 1),
+    visiblePalePixelRatio: ratio(visiblePalePixels, visibleColorSamples, 1),
+    visibleCompositorChangeRatio: ratio(visibleChangedPixels, visibleSamples)
+  };
+}
+
 function fixedWindowBoundsNeedRepair(actualBounds, expectedBounds) {
   if (!actualBounds || !expectedBounds) return true;
   return ['x', 'y', 'width', 'height'].some((key) => (
@@ -598,6 +716,8 @@ module.exports = {
   desktopForegroundRatio,
   desktopPixelMatchRatio,
   desktopSurfaceMatchRatio,
+  effectCompositorMetrics,
+  imageTransparencyMetrics,
   fitCaptureToLogicalBounds,
   fixedWindowBoundsNeedRepair,
   groupShoutEvidenceLayout,

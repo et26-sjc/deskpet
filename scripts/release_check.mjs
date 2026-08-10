@@ -9,15 +9,44 @@ import { auditTextFilesForSensitivePaths } from './lib/privacy.mjs';
 
 const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const failures = [];
+const cliArgs = process.argv.slice(2);
+const verbose = cliArgs.includes('--verbose');
+const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'love-roommate-release-check-'));
+let logIndex = 0;
 
 function run(label, command, args, options = {}) {
-  const result = spawnSync(command, args, { cwd: skillRoot, stdio: 'inherit', shell: false, ...options });
-  if (result.status !== 0) failures.push(`${label} failed with exit code ${result.status}.`);
+  const { showSuccess = true, ...spawnOptions } = options;
+  const startedAt = Date.now();
+  const result = spawnSync(command, args, {
+    cwd: skillRoot,
+    stdio: verbose ? 'inherit' : 'pipe',
+    encoding: verbose ? undefined : 'utf8',
+    shell: false,
+    ...spawnOptions
+  });
+  const output = verbose ? '' : `${result.stdout || ''}${result.stderr || ''}`;
+  if (!verbose) fs.writeFileSync(path.join(logRoot, `${String(++logIndex).padStart(2, '0')}-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 60)}.log`), output, 'utf8');
+  if (result.status !== 0 || result.error) {
+    failures.push(`${label} failed with exit code ${result.status ?? 'unknown'}.`);
+    if (!verbose && output.trim()) process.stderr.write(output);
+    if (result.error) console.error(result.error.message);
+  } else if (!verbose && showSuccess) {
+    console.log(`[pass] ${label} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
+  }
 }
 
 function runPnpm(label, args, options = {}) {
-  const result = spawnPnpm(args, { cwd: skillRoot, stdio: 'inherit', ...options });
-  if (result.status !== 0) failures.push(`${label} failed with exit code ${result.status ?? 'unknown'}.`);
+  const startedAt = Date.now();
+  const result = spawnPnpm(args, { cwd: skillRoot, stdio: verbose ? 'inherit' : 'pipe', encoding: verbose ? undefined : 'utf8', ...options });
+  const output = verbose ? '' : `${result.stdout || ''}${result.stderr || ''}`;
+  if (!verbose) fs.writeFileSync(path.join(logRoot, `${String(++logIndex).padStart(2, '0')}-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 60)}.log`), output, 'utf8');
+  if (result.status !== 0 || result.error) {
+    failures.push(`${label} failed with exit code ${result.status ?? 'unknown'}.`);
+    if (!verbose && output.trim()) process.stderr.write(output);
+    if (result.error) console.error(result.error.message);
+  } else if (!verbose) {
+    console.log(`[pass] ${label} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
+  }
 }
 
 function filesUnder(root, predicate) {
@@ -35,9 +64,12 @@ function filesUnder(root, predicate) {
   return files;
 }
 
-for (const file of filesUnder(skillRoot, (file) => ['.js', '.mjs'].includes(path.extname(file)))) {
-  run(`Syntax check ${path.relative(skillRoot, file)}`, process.execPath, ['--check', file]);
+const syntaxFiles = filesUnder(skillRoot, (file) => ['.js', '.mjs'].includes(path.extname(file)));
+const syntaxFailureCount = failures.length;
+for (const file of syntaxFiles) {
+  run(`Syntax check ${path.relative(skillRoot, file)}`, process.execPath, ['--check', file], { showSuccess: false });
 }
+if (!verbose && failures.length === syntaxFailureCount) console.log(`[pass] Syntax checks (${syntaxFiles.length} files)`);
 run('Skill repository privacy audit', process.execPath, [path.join(skillRoot, 'scripts', 'audit_skill_release.mjs')]);
 const lockRoots = ['sharp', 'electron'].map((kind) => path.join(skillRoot, 'assets', 'runtime-locks', kind));
 for (const lockRoot of lockRoots) {
@@ -69,6 +101,7 @@ run('Release policy tests', process.execPath, ['--test',
   path.join(skillRoot, 'scripts', 'tests', 'scenario-sequence-evidence.test.mjs'),
   path.join(skillRoot, 'scripts', 'tests', 'performance-gate.test.mjs'),
   path.join(skillRoot, 'scripts', 'tests', 'performance-contract-v4.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'workflow-cache.test.mjs'),
   path.join(skillRoot, 'scripts', 'tests', 'utf8-integrity.test.mjs')
 ]);
 run('macOS Electron runtime layout tests', process.execPath, ['--test', path.join(skillRoot, 'scripts', 'tests', 'macos-electron-runtime.test.mjs')]);
@@ -88,7 +121,9 @@ if (process.env.SKIP_OFFICIAL_VALIDATOR !== '1') {
 }
 
 if (failures.length) {
+  console.error(`Full diagnostic logs: ${logRoot}`);
   console.error('Release check failed:\n- ' + failures.join('\n- '));
   process.exit(1);
 }
+if (!verbose) fs.rmSync(logRoot, { recursive: true, force: true });
 console.log('Release check passed.');

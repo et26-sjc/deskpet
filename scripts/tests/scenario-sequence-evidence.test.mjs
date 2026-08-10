@@ -24,10 +24,12 @@ function fixture(t, { scenario, selfId }) {
     characters: ids.map((id) => ({ id }))
   }));
   fs.writeFileSync(path.join(configDir, 'behaviors.json'), JSON.stringify({}));
+  const movingLeader = scenario === 'centipede';
   const samples = Array.from({ length: 10 }, (_, index) => ({
     phase: scenario === 'centipede' ? 'centipede' : 'poopChase',
-    leader: { x: 100 + index * 10, y: 100, vx: 100, vy: 0, frame: 0 },
-    pets: ids.map((id, petIndex) => ({ id, x: 100 + index * 10 - petIndex * 60, y: 100, vx: 100, vy: 0, frame: 0 })),
+    cursor: { x: 100 + index * 10, y: 100 },
+    leader: { x: movingLeader ? 100 + index * 10 : 100, y: 100, vx: movingLeader ? 100 : 0, vy: 0, frame: 0 },
+    pets: ids.map((id, petIndex) => ({ id, x: (movingLeader ? 100 + index * 10 : 100) - petIndex * 60, y: 100, vx: movingLeader ? 100 : 0, vy: 0, frame: 0 })),
     droppings: scenario === 'poop-chase' ? [{
       sourceId: selfId,
       targetId: index < 5 ? 'person-2' : 'person-3',
@@ -35,6 +37,39 @@ function fixture(t, { scenario, selfId }) {
     }] : []
   }));
   return { project, reportDir, ids, samples };
+}
+
+function cleanEffectEvidence(extra = {}) {
+  return {
+    id: 'poop-1',
+    visible: true,
+    transparentPixelRatio: 0.65,
+    visiblePixelRatio: 0.35,
+    partialAlphaPixelRatio: 0.02,
+    desktopForegroundRatio: 0.55,
+    desktopMatchRatio: 1,
+    transparentUnderlayMatchRatio: 1,
+    edgeTransparentUnderlayMatchRatio: 1,
+    cornerTransparentUnderlayMatchRatio: 1,
+    transparentNeutralArtifactRatio: 0,
+    visibleNeutralPixelRatio: 0,
+    visiblePalePixelRatio: 0,
+    visibleCompositorChangeRatio: 1,
+    ...extra
+  };
+}
+
+function cleanDroppingEvidence() {
+  return [cleanEffectEvidence()];
+}
+
+function addEffectUnderlays(reportDir, captures) {
+  for (const capture of captures) {
+    const file = `${capture.label || 'active'}-effect-underlay.png`;
+    fs.writeFileSync(path.join(reportDir, file), 'underlay');
+    capture.effectUnderlay = file;
+  }
+  return captures;
 }
 
 function verify(project, scenario, reportPath) {
@@ -61,26 +96,27 @@ function writePoopChaseReport(reportDir, samples, ids) {
     captures: [
       {
         label: 'active', composition: 'active.png', captureKind: 'desktop-compositor', releaseEligible: true,
-        frames: structuredClone(horizontalFrames),
+        frames: structuredClone(horizontalFrames), droppings: cleanDroppingEvidence(),
         evidence: null
       },
       {
         label: 'eating-person-2', composition: 'eating-person-2.png', captureKind: 'desktop-compositor', releaseEligible: true,
-        frames: structuredClone(horizontalFrames),
+        frames: structuredClone(horizontalFrames), droppings: cleanDroppingEvidence(),
         evidence: { kind: 'eating-climax', elapsedMs: 900, eaterId: 'person-2' }
       },
       {
         label: 'eating-person-3', composition: 'eating-person-3.png', captureKind: 'desktop-compositor', releaseEligible: true,
-        frames: structuredClone(horizontalFrames),
+        frames: structuredClone(horizontalFrames), droppings: cleanDroppingEvidence(),
         evidence: { kind: 'eating-climax', elapsedMs: 2100, eaterId: 'person-3' }
       },
       {
         label: 'handoff-person-2-to-person-3', composition: 'handoff-person-2-to-person-3.png', captureKind: 'desktop-compositor', releaseEligible: true,
-        frames: structuredClone(horizontalFrames),
+        frames: structuredClone(horizontalFrames), droppings: cleanDroppingEvidence(),
         evidence: { kind: 'handoff-return', elapsedMs: 1500, returningEaterId: 'person-2', nextEaterId: 'person-3' }
       }
     ]
   };
+  addEffectUnderlays(reportDir, report.captures);
   const reportPath = path.join(reportDir, 'report.json');
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
   return { reportPath, report };
@@ -100,7 +136,7 @@ test('scenario gate rejects synthetic development captures and requires release-
       captureKind: 'synthetic-development',
       releaseEligible: false,
       frames: ids.map((id) => ({ id })),
-      effects: [{ role: 'cursor-poop', visible: true }],
+      effects: [cleanEffectEvidence({ role: 'cursor-poop', id: undefined })],
       compositionBounds: { x: 0, y: 0, width: 800, height: 600 },
       evidence: { kind: 'cursor-centipede', elapsedMs, leaderPosition: { x, y: 100 } }
     };
@@ -116,6 +152,7 @@ test('scenario gate rejects synthetic development captures and requires release-
     capture.captureKind = 'desktop-compositor';
     capture.releaseEligible = true;
   }
+  addEffectUnderlays(reportDir, captures);
   fs.writeFileSync(reportPath, JSON.stringify({ scenario: 'centipede', samples, captures }, null, 2));
   const accepted = verify(project, 'centipede', reportPath);
   assert.equal(accepted.status, 0, accepted.stderr);
@@ -147,11 +184,12 @@ test('scenario gate rejects a no-self centipede report without two distinct full
       captureKind: 'desktop-compositor',
       releaseEligible: true,
       frames: ids.map((id) => ({ id })),
-      effects: [{ role: 'cursor-poop', visible: true }],
+      effects: [cleanEffectEvidence({ role: 'cursor-poop', id: undefined })],
       compositionBounds: { x: 0, y: 0, width: 800, height: 600 },
       evidence: { kind: 'cursor-centipede', elapsedMs, leaderPosition: { x, y: 100 } }
     };
   });
+  addEffectUnderlays(reportDir, captures);
   const valid = { scenario: 'centipede', samples, captures };
   fs.writeFileSync(reportPath, JSON.stringify(valid, null, 2));
   assert.equal(verify(project, 'centipede', reportPath).status, 0, 'two distinct centipede moments should pass');
@@ -205,26 +243,76 @@ test('scenario gate rejects self-poop evidence with only one eater and no return
     samples,
     captures: [
       {
-        label: 'active', composition: 'active.png', captureKind: 'desktop-compositor', releaseEligible: true, frames: fullFrames,
+        label: 'active', composition: 'active.png', captureKind: 'desktop-compositor', releaseEligible: true, frames: fullFrames, droppings: cleanDroppingEvidence(),
         evidence: null
       },
       {
-        label: 'eating-person-2', composition: 'eating-person-2.png', captureKind: 'desktop-compositor', releaseEligible: true, frames: fullFrames,
+        label: 'eating-person-2', composition: 'eating-person-2.png', captureKind: 'desktop-compositor', releaseEligible: true, frames: fullFrames, droppings: cleanDroppingEvidence(),
         evidence: { kind: 'eating-climax', elapsedMs: 900, eaterId: 'person-2' }
       },
       {
-        label: 'eating-person-3', composition: 'eating-person-3.png', captureKind: 'desktop-compositor', releaseEligible: true, frames: fullFrames,
+        label: 'eating-person-3', composition: 'eating-person-3.png', captureKind: 'desktop-compositor', releaseEligible: true, frames: fullFrames, droppings: cleanDroppingEvidence(),
         evidence: { kind: 'eating-climax', elapsedMs: 2100, eaterId: 'person-3' }
       },
       {
-        label: 'handoff-person-2-to-person-3', composition: 'handoff-person-2-to-person-3.png', captureKind: 'desktop-compositor', releaseEligible: true, frames: fullFrames,
+        label: 'handoff-person-2-to-person-3', composition: 'handoff-person-2-to-person-3.png', captureKind: 'desktop-compositor', releaseEligible: true, frames: fullFrames, droppings: cleanDroppingEvidence(),
         evidence: { kind: 'handoff-return', elapsedMs: 1500, returningEaterId: 'person-2', nextEaterId: 'person-3' }
       }
     ]
   };
+  addEffectUnderlays(reportDir, valid.captures);
   fs.writeFileSync(reportPath, JSON.stringify(valid, null, 2));
   const accepted = verify(project, 'poop-chase', reportPath);
   assert.equal(accepted.status, 0, accepted.stderr);
+});
+
+test('scenario gate rejects selected-self poop chase that follows ordinary cursor movement', (t) => {
+  const { project, reportDir, samples, ids } = fixture(t, { scenario: 'poop-chase', selfId: 'person-1' });
+  const movingSamples = samples.map((sample, index) => ({
+    ...sample,
+    leader: { ...sample.leader, x: sample.leader.x + index * 4, vx: 40 },
+    pets: sample.pets.map((pet) => ({ ...pet, x: pet.x + index * 4, vx: 40 }))
+  }));
+  const { reportPath } = writePoopChaseReport(reportDir, movingSamples, ids);
+
+  const result = verify(project, 'poop-chase', reportPath);
+  assert.notEqual(result.status, 0, 'self-poop report that follows ordinary cursor movement unexpectedly passed');
+  assert.match(result.stderr, /fixed formation|ordinary cursor|moved self|moved the fixed queue/i);
+});
+
+test('scenario gate rejects a white or opaque dropping rectangle even when the capture exists', (t) => {
+  const { project, reportDir, samples, ids } = fixture(t, { scenario: 'poop-chase', selfId: 'person-1' });
+  const { reportPath, report } = writePoopChaseReport(reportDir, samples, ids);
+  report.captures[0].droppings[0] = {
+    ...report.captures[0].droppings[0],
+    transparentPixelRatio: 0,
+    visiblePixelRatio: 1,
+    desktopForegroundRatio: 1
+  };
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+
+  const result = verify(project, 'poop-chase', reportPath);
+  assert.notEqual(result.status, 0, 'opaque dropping rectangle unexpectedly passed');
+  assert.match(result.stderr, /opaque box|white border|gray halo|transparent-edge/i);
+});
+
+test('scenario gate rejects a compositor white box even when the effect PNG claims clean alpha', (t) => {
+  const { project, reportDir, samples, ids } = fixture(t, { scenario: 'poop-chase', selfId: 'person-1' });
+  const { reportPath, report } = writePoopChaseReport(reportDir, samples, ids);
+  report.captures[0].droppings[0] = {
+    ...report.captures[0].droppings[0],
+    transparentPixelRatio: 0.65,
+    visiblePixelRatio: 0.35,
+    transparentUnderlayMatchRatio: 0.35,
+    edgeTransparentUnderlayMatchRatio: 0,
+    cornerTransparentUnderlayMatchRatio: 0,
+    transparentNeutralArtifactRatio: 0.6
+  };
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+
+  const result = verify(project, 'poop-chase', reportPath);
+  assert.notEqual(result.status, 0, 'desktop-composited white box unexpectedly passed because the effect PNG alpha looked clean');
+  assert.match(result.stderr, /opaque box|white border|gray halo|compositor transparency mismatch/i);
 });
 
 test('scenario gate rejects self-poop samples whose horizontal queue Y spread exceeds one pixel', (t) => {

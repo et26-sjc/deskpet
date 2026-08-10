@@ -12,7 +12,7 @@ const configBase = JSON.parse(fs.readFileSync(path.join(root, 'src/config/pet.co
 const behaviors = JSON.parse(fs.readFileSync(path.join(root, 'src/config/behaviors.json'), 'utf8'));
 const manifestBase = JSON.parse(fs.readFileSync(path.join(root, 'src/assets/sprites/manifest.json'), 'utf8'));
 
-function fixture(count = 5) {
+function fixture(count = 5, { selfId = null } = {}) {
   const config = structuredClone(configBase);
   const manifest = structuredClone(manifestBase);
   const fixtureBehaviors = structuredClone(behaviors);
@@ -23,9 +23,9 @@ function fixture(count = 5) {
     arrivalTolerance: 1,
     trailSampleDistance: 3
   };
-  config.selection.userCharacterId = null;
-  config.selection.prankExcludedCharacterIds = [];
-  config.selection.chaseVariant = 'cursor-centipede';
+  config.selection.userCharacterId = selfId;
+  config.selection.prankExcludedCharacterIds = selfId ? [selfId] : [];
+  config.selection.chaseVariant = selfId ? 'self-poop' : 'cursor-centipede';
   config.characters = Array.from({ length: count }, (_, index) => ({ id: `person-${index + 1}`, displayName: `P${index + 1}`, hueRotate: 0 }));
   manifest.characters = config.characters.map((character) => ({ ...structuredClone(manifestBase.characters[0]), id: character.id }));
   return new BehaviorEngine({
@@ -203,6 +203,13 @@ function assertFiniteState(snapshot) {
   }
 }
 
+function assertSelectedSelfNeverCrawls(engine, label) {
+  const selfId = engine.config.selection.userCharacterId;
+  const self = engine.pets.find((pet) => pet.id === selfId);
+  assert.ok(self, `${label}: missing selected self ${selfId}`);
+  assert.doesNotMatch(self.action, /^(?:crawl|centipede)_/, `${label}: selected self used ${self.action}`);
+}
+
 function runUntil(engine, predicate, cursor, maxFrames = 2400) {
   for (let frame = 0; frame < maxFrames; frame += 1) {
     const snapshot = engine.update(1 / 60, typeof cursor === 'function' ? cursor() : cursor);
@@ -219,6 +226,56 @@ test('samples a trail by arc length', () => {
   const result = sampleTrail([{ x: 10, y: 0 }, { x: 0, y: 0 }, { x: -10, y: 0 }], 15);
   assert.equal(result.x, -5);
   assert.equal(result.y, 0);
+});
+
+test('selected self stays upright in free roam for every supported people count and self position', () => {
+  for (let count = 1; count <= 8; count += 1) {
+    for (let selfNumber = 1; selfNumber <= count; selfNumber += 1) {
+      const selfId = `person-${selfNumber}`;
+      const engine = fixture(count, { selfId });
+      assertSelectedSelfNeverCrawls(engine, `${count} people / ${selfId} initial state`);
+      assert.match(engine.pets.find((pet) => pet.id === selfId).action, /^idle_/);
+      for (const pet of engine.pets.filter((item) => item.id !== selfId)) assert.match(pet.action, /^crawl_/);
+
+      for (let frame = 0; frame < 120; frame += 1) {
+        engine.update(1 / 60, { x: 400, y: 450 });
+        assertSelectedSelfNeverCrawls(engine, `${count} people / ${selfId} free frame ${frame}`);
+      }
+
+      const self = engine.pets.find((pet) => pet.id === selfId);
+      self.action = 'crawl_right';
+      engine.sanitizeState();
+      assert.match(self.action, /^idle_/);
+
+      engine.setDragging(selfId, true, { x: self.x, y: self.y });
+      assert.equal(self.action, 'drag');
+      engine.setDragging(selfId, false, { x: self.x, y: self.y });
+      assert.match(self.action, /^idle_/);
+
+      engine.respawn();
+      assertSelectedSelfNeverCrawls(engine, `${count} people / ${selfId} respawn`);
+      assert.match(engine.pets.find((pet) => pet.id === selfId).action, /^idle_/);
+    }
+  }
+});
+
+test('selected self never crawls while entering shout or self-poop modes', () => {
+  const engine = poopFixture();
+  engine.config.selection.userCharacterId = 'person-3';
+  engine.config.selection.prankExcludedCharacterIds = ['person-3'];
+  engine.config.selection.chaseVariant = 'self-poop';
+
+  engine.callDad();
+  for (let frame = 0; frame < 360; frame += 1) {
+    engine.update(1 / 60, { x: 700, y: 400 });
+    assertSelectedSelfNeverCrawls(engine, `shout frame ${frame}`);
+  }
+
+  engine.togglePoopChase({ x: 900, y: 320 });
+  for (let frame = 0; frame < 720; frame += 1) {
+    engine.update(1 / 60, { x: 900, y: 320 });
+    assertSelectedSelfNeverCrawls(engine, `self-poop frame ${frame}`);
+  }
 });
 
 test('centipede followers remain separated and inside work area', () => {
@@ -716,7 +773,7 @@ test('entering every chase mode preserves visible positions and moves through bo
   }
 });
 
-test('cross-display poop chase crosses a work-area gap without stalling or teleporting', () => {
+test('self-present cross-display poop chase ignores a remote cursor and settles on the self display', () => {
   const engine = crossDisplayFixture();
   engine.config.selection.userCharacterId = 'person-3';
   const cursor = { x: 1700, y: -520 };
@@ -730,11 +787,11 @@ test('cross-display poop chase crosses a work-area gap without stalling or telep
     previous = assertBoundedCharacterFrame(engine, previous, 1 / 60, `cross-display poop frame ${frame}`);
   }
 
-  assert.equal(engine.formationTransition, null, 'cross-display poop chase stalled at the work-area gap');
-  assertPetsInsideDisplay(engine, 'upper');
+  assert.equal(engine.formationTransition, null, 'self-present poop chase did not finish its one-time safe placement');
+  assertPetWindowsInsideDisplay(engine, 'lower');
 });
 
-test('eight-person cross-display poop chase settles every full window inside the lower target work area', () => {
+test('eight-person self-present poop chase ignores a remote cursor and stays on the self display', () => {
   const engine = crossDisplayFixture(8);
   engine.config.selection.userCharacterId = 'person-6';
   engine.behaviors.poopChase.leaderId = 'person-6';
@@ -758,9 +815,9 @@ test('eight-person cross-display poop chase settles every full window inside the
     previous = assertBoundedCharacterFrame(engine, previous, 1 / 60, `lower-display chase frame ${frame}`);
   }
 
-  assert.equal(engine.formationTransition, null, 'lower-display chase did not finish its bounded formation transition');
-  assertHorizontalRow(engine.poopChaseParticipants().participants, 'lower-display chase row');
-  assertPetWindowsInsideDisplay(engine, 'lower');
+  assert.equal(engine.formationTransition, null, 'self-display chase did not finish its bounded formation transition');
+  assertHorizontalRow(engine.poopChaseParticipants().participants, 'self-display chase row');
+  assertPetWindowsInsideDisplay(engine, 'upper');
 });
 
 test('cross-display group shout crosses a work-area gap without stalling or teleporting', () => {
@@ -954,7 +1011,7 @@ test('eight-person self-poop chase settles into one horizontal row', () => {
   assertHorizontalRow(participants, 'eight-person self-poop row');
 });
 
-test('self-poop chase keeps its horizontal row while following a diagonal cursor', () => {
+test('self-poop chase stays fixed after its one-time safe placement even when the cursor moves', () => {
   const engine = poopFixture(8);
   engine.config.selection.userCharacterId = 'person-6';
   engine.behaviors.poopChase.leaderId = 'person-6';
@@ -965,13 +1022,13 @@ test('self-poop chase keeps its horizontal row while following a diagonal cursor
 
   engine.togglePoopChase(startCursor);
   runUntilFormationComplete(engine, startCursor);
-  let previous = positions(engine);
+  const fixed = positions(engine);
 
   for (let frame = 0; frame < 240; frame += 1) {
     const cursor = { x: 1080, y: 180 + Math.sin(frame / 20) * 80 };
     engine.update(1 / 60, cursor);
-    previous = assertBoundedCharacterFrame(engine, previous, 1 / 60, `self-poop diagonal frame ${frame}`);
-    assertHorizontalRow(engine.poopChaseParticipants().participants, `self-poop diagonal frame ${frame}`);
+    assert.ok(maxPositionDelta(fixed, positions(engine)) <= 0.01, `self-poop cursor movement shifted the fixed row at frame ${frame}`);
+    assertHorizontalRow(engine.poopChaseParticipants().participants, `fixed self-poop frame ${frame}`);
     assert.equal(engine.droppings.length, 1);
     assert.equal(engine.droppings[0].sourceId, 'person-6');
   }
@@ -996,7 +1053,7 @@ test('cursor-poop chase keeps one horizontal row behind a moving dropping', () =
   }
 });
 
-test('active horizontal poop row respects the shared displacement cap while crossing displays', async (t) => {
+test('self-poop row never crosses displays in response to cursor movement', async (t) => {
   for (const dt of [1 / 60, 0.08, 1]) {
     await t.test(`dt=${dt}`, () => {
       const engine = crossDisplayFixture(8);
@@ -1008,40 +1065,39 @@ test('active horizontal poop row respects the shared displacement cap while cros
       const upperCursor = { x: 1700, y: -520 };
       engine.togglePoopChase(upperCursor);
       runUntilFormationComplete(engine, upperCursor);
-      const limit = engine.behaviors.motion.maxSpeed * Math.min(dt, 0.1);
-      let previous = positions(engine);
-      for (let frame = 0; frame < 1200; frame += 1) {
+      const fixed = positions(engine);
+      for (let frame = 0; frame < 120; frame += 1) {
         engine.update(dt, { x: 1450, y: 1200 });
-        const current = positions(engine);
-        const displacement = maxPositionDelta(previous, current);
-        assert.ok(displacement <= limit + 0.05, `active cross-display dt=${dt} frame ${frame} moved ${displacement.toFixed(2)}px beyond ${limit.toFixed(2)}px`);
-        assertHorizontalRow(engine.poopChaseParticipants().participants, `active cross-display dt=${dt} frame ${frame}`);
-        previous = current;
+        const displacement = maxPositionDelta(fixed, positions(engine));
+        assert.ok(displacement <= 0.01, `fixed self-poop row moved ${displacement.toFixed(2)}px for dt=${dt} frame ${frame}`);
+        assertHorizontalRow(engine.poopChaseParticipants().participants, `fixed cross-display dt=${dt} frame ${frame}`);
       }
     });
   }
 });
 
-test('self and cursor poop rows turn every participant together without reordering ids', async (t) => {
-  for (const hasUser of [true, false]) {
-    await t.test(hasUser ? 'self-poop' : 'cursor-poop', () => {
-      const engine = poopFixture(5);
-      engine.config.selection.userCharacterId = hasUser ? 'person-3' : null;
-      const startCursor = { x: 900, y: 320 };
-      engine.togglePoopChase(startCursor);
-      runUntilFormationComplete(engine, startCursor);
-      const initialIds = engine.poopChaseParticipants().participants.map((pet) => pet.id);
-      const leftCursor = { x: -180, y: 320 };
-      runUntil(engine, () => engine.poopChaseParticipants().leader?.direction === 'left', leftCursor);
-      for (let frame = 0; frame < 30; frame += 1) engine.update(1 / 60, leftCursor);
+test('only the no-self cursor-poop row turns toward the moving mouse', () => {
+  const selfEngine = poopFixture(5);
+  selfEngine.config.selection.userCharacterId = 'person-3';
+  const startCursor = { x: 900, y: 320 };
+  selfEngine.togglePoopChase(startCursor);
+  runUntilFormationComplete(selfEngine, startCursor);
+  const selfDirections = selfEngine.poopChaseParticipants().participants.map((pet) => pet.direction);
+  for (let frame = 0; frame < 240; frame += 1) selfEngine.update(1 / 60, { x: -180, y: 320 });
+  assert.deepEqual(selfEngine.poopChaseParticipants().participants.map((pet) => pet.direction), selfDirections);
 
-      const { participants } = engine.poopChaseParticipants();
-      assert.deepEqual(participants.map((pet) => pet.id), initialIds);
-      assertHorizontalRow(participants, `${hasUser ? 'self' : 'cursor'} left-facing row`);
-      assert.ok(participants.every((pet) => pet.direction === 'left'), 'the whole poop row must face the movement direction together');
-      assert.ok(participants.every((pet) => pet.action.endsWith('_left')), 'the whole poop row must use left-facing actions together');
-    });
-  }
+  const cursorEngine = poopFixture(5);
+  cursorEngine.config.selection.userCharacterId = null;
+  cursorEngine.togglePoopChase(startCursor);
+  runUntilFormationComplete(cursorEngine, startCursor);
+  const initialIds = cursorEngine.poopChaseParticipants().participants.map((pet) => pet.id);
+  const leftCursor = { x: -180, y: 320 };
+  runUntil(cursorEngine, () => cursorEngine.poopChaseParticipants().leader?.direction === 'left', leftCursor);
+  const { participants } = cursorEngine.poopChaseParticipants();
+  assert.deepEqual(participants.map((pet) => pet.id), initialIds);
+  assertHorizontalRow(participants, 'cursor-poop left-facing row');
+  assert.ok(participants.every((pet) => pet.direction === 'left'));
+  assert.ok(participants.every((pet) => pet.action.endsWith('_left')));
 });
 
 test('self-present poop chase keeps one source dropping visible while the formation gathers', () => {
@@ -1235,25 +1291,39 @@ test('each follower eats poop from the selected self before the selected self se
   assert.equal(engine.droppings[0].sourceId, 'person-3');
 });
 
-test('selected self follows the cursor while the eating queue rotates behind it with one dropping', () => {
+test('selected self ignores the cursor and dragging self repositions the complete fixed queue', () => {
   const engine = poopFixture();
   engine.config.selection.userCharacterId = 'person-3';
   engine.togglePoopChase({ x: 900, y: 320 });
   runUntilFormationComplete(engine, { x: 900, y: 320 });
   const leader = engine.pets.find((pet) => pet.id === 'person-3');
-  const leaderBefore = { x: leader.x, y: leader.y };
+  const fixed = positions(engine);
   for (let frame = 0; frame < 240; frame += 1) {
     engine.update(1 / 60, { x: 1080, y: 300 });
     assert.equal(engine.droppings.length, 1);
     assert.equal(engine.droppings[0].sourceId, 'person-3');
   }
-  const movedX = leader.x - leaderBefore.x;
-  const movedY = leader.y - leaderBefore.y;
-  assert.ok(Math.hypot(movedX, movedY) >= 40, 'relay leader must visibly follow the cursor');
+  assert.ok(maxPositionDelta(fixed, positions(engine)) <= 0.01, 'mouse movement must not move a self-present poop queue');
+
+  const beforeDrag = positions(engine);
+  const droppingBefore = { x: engine.droppings[0].x, y: engine.droppings[0].y };
+  engine.setDragging('person-3', true, { x: leader.x + 120, y: leader.y - 60 });
+  const afterDrag = positions(engine);
+  const leaderDx = afterDrag['person-3'].x - beforeDrag['person-3'].x;
+  const leaderDy = afterDrag['person-3'].y - beforeDrag['person-3'].y;
+  assert.ok(Math.hypot(leaderDx, leaderDy) >= 40, 'dragging self should visibly reposition the queue');
   for (const pet of engine.pets) {
-    assert.ok(pet.x >= -300 && pet.x <= 1188, `${pet.id} escaped the work area horizontally`);
-    assert.ok(pet.y >= 0 && pet.y <= 788, `${pet.id} escaped the work area vertically`);
+    assert.ok(Math.abs(afterDrag[pet.id].x - beforeDrag[pet.id].x - leaderDx) <= 0.01, `${pet.id} did not keep the rigid row X offset`);
+    assert.ok(Math.abs(afterDrag[pet.id].y - beforeDrag[pet.id].y - leaderDy) <= 0.01, `${pet.id} did not keep the rigid row Y offset`);
   }
+  assert.ok(Math.abs(engine.droppings[0].x - droppingBefore.x - leaderDx) <= 0.01);
+  assert.ok(Math.abs(engine.droppings[0].y - droppingBefore.y - leaderDy) <= 0.01);
+  assert.equal(leader.action, `poop_${leader.direction}`);
+  engine.setDragging('person-3', false);
+  const released = positions(engine);
+  for (let frame = 0; frame < 120; frame += 1) engine.update(1 / 60, { x: -200, y: 50 });
+  assert.ok(maxPositionDelta(released, positions(engine)) <= 0.01, 'released self-poop queue must remain fixed');
+  assertHorizontalRow(engine.poopChaseParticipants().participants, 'dragged self-poop row');
 });
 
 test('self keeps pooping while the next eater eats and the remaining followers crawl after them', () => {

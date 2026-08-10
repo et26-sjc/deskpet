@@ -6,11 +6,12 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { applyCodexRuntimeArgs, ensureElectronRuntime, fail, parseArgs, readJson } from './lib/common.mjs';
 import { portableRelative } from './lib/privacy.mjs';
+import { transferPackagedDirectory } from './lib/release-transfer.mjs';
 import { scenarioDurationMs } from './lib/scenario-timing.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 applyCodexRuntimeArgs(args);
-if (!args.project) fail('Usage: node build_project.mjs --project <project> [--source <original-photo>] [--pnpm <codex-pnpm>] [--node-modules <codex-node-modules>] [--refresh-smoke] [--skip-smoke] [--skip-scenarios] [--verify-only]');
+if (!args.project) fail('Usage: node build_project.mjs --project <project> [--source <original-photo>] [--pnpm <codex-pnpm>] [--node-modules <codex-node-modules>] [--refresh-smoke] [--refresh-runtime] [--refresh-scenarios <csv>] [--performance-profile <full|quick>] [--skip-smoke] [--skip-scenarios] [--verify-only]');
 const project = path.resolve(args.project);
 if (!fs.existsSync(path.join(project, 'package.json'))) fail(`Not a generated project: ${project}`);
 if (process.platform !== 'win32' && !(process.platform === 'darwin' && process.arch === 'arm64')) {
@@ -38,6 +39,17 @@ const behaviors = readJson(path.join(project, 'src', 'config', 'behaviors.json')
 const productName = config.app?.name || 'Love Roommate';
 const safeName = productName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim() || 'Love Roommate';
 const nodeArgs = process.env.CODEX_NODE_MODULES ? ['--node-modules', process.env.CODEX_NODE_MODULES] : [];
+const performanceProfile = typeof args['performance-profile'] === 'string' ? args['performance-profile'] : 'full';
+if (!['full', 'quick'].includes(performanceProfile)) fail('--performance-profile must be full or quick.');
+const refreshRuntime = Boolean(args['refresh-smoke'] || args['refresh-runtime']);
+const refreshScenarioSet = new Set(
+  typeof args['refresh-scenarios'] === 'string'
+    ? args['refresh-scenarios'].split(',').map((value) => value.trim()).filter(Boolean)
+    : []
+);
+for (const scenario of refreshScenarioSet) {
+  if (!['centipede', 'poop-chase', 'dad-shout', 'grandpa-shout'].includes(scenario)) fail(`Unknown refresh scenario: ${scenario}`);
+}
 
 function verifyScenarioReport(scenario, reportPath) {
   if (!fs.existsSync(reportPath)) fail(`Scenario report is missing: ${reportPath}`);
@@ -287,9 +299,12 @@ function verifyScenarioReport(scenario, reportPath) {
     return;
   }
   const leaders = samples.map((sample) => sample.leader).filter(Boolean);
-  if (leaders.length < 2 || Math.hypot(leaders.at(-1).x - leaders[0].x, leaders.at(-1).y - leaders[0].y) < 40) {
-    fail(`${scenario} leader did not visibly follow the simulated cursor.`);
-  }
+  const cursorPoints = samples.map((sample) => sample.cursor).filter((cursor) => (
+    cursor && Number.isFinite(cursor.x) && Number.isFinite(cursor.y)
+  ));
+  const maxTravelFromFirst = (points) => points.length < 2 ? 0 : Math.max(...points.map((point) => (
+    Math.hypot(point.x - points[0].x, point.y - points[0].y)
+  )));
   const characterIds = config.characters.map((character) => character.id);
   const requireFullComposition = (capture, description) => {
     const composition = path.join(path.dirname(reportPath), capture?.composition || '');
@@ -297,7 +312,51 @@ function verifyScenarioReport(scenario, reportPath) {
     const capturedIds = new Set((capture.frames || []).map((frame) => frame.id));
     if (characterIds.some((id) => !capturedIds.has(id))) fail(`${description} does not contain every character window.`);
   };
+  const requireCleanEffectEvidence = (capture, items, description) => {
+    if (typeof capture?.effectUnderlay !== 'string' || !capture.effectUnderlay) {
+      fail(`${description} is missing the compositor underlay captured with the poop window hidden.`);
+    }
+    const scenarioDirectory = path.dirname(reportPath);
+    const underlay = path.resolve(scenarioDirectory, capture.effectUnderlay);
+    const relativeUnderlay = path.relative(scenarioDirectory, underlay);
+    if (!relativeUnderlay || relativeUnderlay.startsWith('..') || path.isAbsolute(relativeUnderlay) || !fs.existsSync(underlay)) {
+      fail(`${description} has an unsafe or missing compositor underlay image.`);
+    }
+    for (const item of items.filter((entry) => entry.visible !== false)) {
+      const metrics = [
+        item.transparentPixelRatio,
+        item.visiblePixelRatio,
+        item.desktopForegroundRatio,
+        item.desktopMatchRatio,
+        item.transparentUnderlayMatchRatio,
+        item.edgeTransparentUnderlayMatchRatio,
+        item.cornerTransparentUnderlayMatchRatio,
+        item.transparentNeutralArtifactRatio,
+        item.visibleNeutralPixelRatio,
+        item.visiblePalePixelRatio,
+        item.visibleCompositorChangeRatio
+      ];
+      if (!metrics.every(Number.isFinite)
+        || item.transparentPixelRatio < 0.15
+        || item.visiblePixelRatio > 0.78
+        || item.desktopForegroundRatio < 0.005
+        || item.desktopForegroundRatio > 0.78
+        || item.desktopMatchRatio < 0.1
+        || item.transparentUnderlayMatchRatio < 0.94
+        || item.edgeTransparentUnderlayMatchRatio < 0.94
+        || item.cornerTransparentUnderlayMatchRatio < 0.94
+        || item.transparentNeutralArtifactRatio > 0.01
+        || item.visibleNeutralPixelRatio > 0.03
+        || item.visiblePalePixelRatio > 0.005
+        || item.visibleCompositorChangeRatio < 0.1) {
+        fail(`${description} has an opaque box, white border, gray halo, or compositor transparency mismatch.`);
+      }
+    }
+  };
   if (scenario === 'centipede') {
+    if (leaders.length < 2 || maxTravelFromFirst(leaders) < 40) {
+      fail('Centipede leader did not visibly follow the simulated cursor.');
+    }
     const sequence = captures.filter((capture) => capture.evidence?.kind === 'cursor-centipede');
     if (sequence.length < 2) fail('Centipede evidence must contain two distinct full-composition chase moments.');
     const viewportKey = (capture) => {
@@ -312,9 +371,11 @@ function verifyScenarioReport(scenario, reportPath) {
     }
     for (const capture of sequence) {
       requireFullComposition(capture, `Centipede capture ${capture.label || 'unlabeled'}`);
-      if (!(capture.effects || []).some((effect) => effect.role === 'cursor-poop' && effect.visible !== false)) {
+      const visibleEffects = (capture.effects || []).filter((effect) => effect.role === 'cursor-poop' && effect.visible !== false);
+      if (visibleEffects.length !== 1) {
         fail(`Centipede capture ${capture.label || 'unlabeled'} is missing the visible cursor poop.`);
       }
+      requireCleanEffectEvidence(capture, visibleEffects, `Centipede capture ${capture.label || 'unlabeled'} cursor poop`);
     }
     const position = (capture) => capture.evidence?.leaderPosition;
     const distinctMoments = sequence.some((capture, index) => sequence.slice(index + 1).some((other) => {
@@ -328,6 +389,12 @@ function verifyScenarioReport(scenario, reportPath) {
     if (!distinctMoments) fail('Centipede evidence must show two distinct times and chase positions at least 40 pixels apart.');
   }
   if (scenario === 'poop-chase') {
+    if (cursorPoints.length < 2 || maxTravelFromFirst(cursorPoints) < 40) {
+      fail('Selected-self poop chase did not exercise ordinary cursor movement during validation.');
+    }
+    if (leaders.length < 2 || maxTravelFromFirst(leaders) > 1 || leaders.some((leader) => Math.hypot(leader.vx || 0, leader.vy || 0) > 1)) {
+      fail('Selected-self poop chase moved self in response to ordinary cursor movement instead of keeping the fixed formation.');
+    }
     const characterSet = new Set(characterIds);
     const horizontalSpread = (values, description) => {
       if (values.length !== characterIds.length || values.some((value) => !Number.isFinite(value))) {
@@ -337,6 +404,7 @@ function verifyScenarioReport(scenario, reportPath) {
         fail(`${description} is not horizontally aligned within one pixel.`);
       }
     };
+    const fixedPositions = new Map((samples[0]?.pets || []).map((pet) => [pet.id, { x: pet.x, y: pet.y }]));
     for (const sample of samples) {
       const row = (sample.pets || []).filter((pet) => characterSet.has(pet.id));
       const rowIds = new Set(row.map((pet) => pet.id));
@@ -345,6 +413,13 @@ function verifyScenarioReport(scenario, reportPath) {
         fail('Poop chase samples must contain every character exactly once.');
       }
       horizontalSpread(row.map((pet) => pet.y), 'Poop chase sampled queue');
+      for (const pet of row) {
+        const fixed = fixedPositions.get(pet.id);
+        if (!fixed || ![pet.x, pet.y, fixed.x, fixed.y].every(Number.isFinite)
+          || Math.hypot(pet.x - fixed.x, pet.y - fixed.y) > 1) {
+          fail('Selected-self poop chase moved the fixed queue in response to ordinary cursor movement.');
+        }
+      }
     }
     if (samples.some((sample) => (sample.droppings || []).length !== 1)) fail('Poop relay must keep exactly one dropping in every sampled frame.');
     const sources = new Set(samples.flatMap((sample) => (sample.droppings || []).map((dropping) => dropping.sourceId)).filter(Boolean));
@@ -376,6 +451,9 @@ function verifyScenarioReport(scenario, reportPath) {
     if (!activeCapture) fail('Poop chase evidence is missing the scheduled active capture.');
     requireFullComposition(activeCapture, 'Poop chase active capture');
     for (const capture of captures) {
+      const visibleDroppings = (capture.droppings || []).filter((dropping) => dropping.visible !== false);
+      if (visibleDroppings.length !== 1) fail(`Poop chase capture ${capture.label || 'unlabeled'} must contain exactly one visible dropping.`);
+      requireCleanEffectEvidence(capture, visibleDroppings, `Poop chase capture ${capture.label || 'unlabeled'} dropping`);
       const rowFrames = characterIds.map((id) => (capture.frames || []).find((frame) => frame.id === id));
       horizontalSpread(
         rowFrames.map((frame) => frame?.bounds?.y),
@@ -475,13 +553,13 @@ if (!runNode('--test', [
 fs.mkdirSync(preview, { recursive: true });
 
 const runtimeEvidenceFiles = [runtime, runtimeSecond, runtimePaused, runtimeSmokeTechnical, runtimeEvidenceManifest];
-if (args['refresh-smoke']) {
+if (args['refresh-smoke'] || args['refresh-runtime']) {
   for (const name of obsoleteRuntimeEvidenceNames) {
     const obsoletePath = path.join(preview, name);
     fs.rmSync(obsoletePath, { force: true });
   }
 }
-if (!args['skip-smoke'] && (runtimeEvidenceFiles.some((file) => !fs.existsSync(file)) || args['refresh-smoke'])) {
+if (!args['skip-smoke'] && (runtimeEvidenceFiles.some((file) => !fs.existsSync(file)) || refreshRuntime)) {
   for (const file of [...runtimeEvidenceFiles, runtimeSmokeError]) {
     fs.rmSync(file, { force: true });
   }
@@ -505,7 +583,7 @@ if (!args['skip-scenarios']) {
   for (const scenario of scenarios) {
     const scenarioDir = path.join(preview, 'scenarios', scenario);
     const reportPath = path.join(scenarioDir, 'report.json');
-    const refreshScenario = args['refresh-smoke'] || !fs.existsSync(reportPath);
+    const refreshScenario = args['refresh-smoke'] || refreshScenarioSet.has(scenario) || !fs.existsSync(reportPath);
     if (refreshScenario) {
       fs.rmSync(scenarioDir, { recursive: true, force: true });
       fs.mkdirSync(scenarioDir, { recursive: true });
@@ -526,7 +604,7 @@ if (!runNode(selfCheckScript, ['--project', project, '--preview', preview, '--ru
 if (!runNode(privacyScript, ['--root', outputRoot, ...sourceArgs])) {
   fail('Output privacy audit failed. Remove host paths, unlisted raster files, or copied source photos before packaging.');
 }
-if (process.platform === 'win32') {
+if (process.platform === 'win32' && (performanceProfile === 'full' || args['release-performance-gate'])) {
   packageStagedCandidate();
   validatePerformanceCandidate(stagedPackagedArtifact);
 }
@@ -580,7 +658,12 @@ if (process.platform === 'win32') {
   if (!appDirectories.length) fail(`No portable Windows app directory found under ${sourceRoot}`);
   for (const appDirectory of appDirectories) {
     const destination = uniquePath(path.join(release, path.basename(appDirectory)));
-    fs.cpSync(appDirectory, destination, { recursive: true, errorOnExist: true });
+    try {
+      const transfer = transferPackagedDirectory(appDirectory, destination);
+      console.log(`Release artifact transferred via ${transfer.method}: ${portableRelative(outputRoot, destination)}`);
+    } catch (error) {
+      fail(`Could not transfer the packaged Windows app into release: ${error?.message || error}`);
+    }
     copied.push(destination);
   }
 } else {
@@ -598,7 +681,12 @@ if (process.platform === 'win32') {
   if (!appBundles.length) fail(`No macOS app bundle found under ${dist}`);
   for (const bundle of appBundles) {
     const destination = uniquePath(path.join(release, path.basename(bundle)));
-    fs.cpSync(bundle, destination, { recursive: true, errorOnExist: true, verbatimSymlinks: true });
+    try {
+      const transfer = transferPackagedDirectory(bundle, destination, { verbatimSymlinks: true });
+      console.log(`Release artifact transferred via ${transfer.method}: ${portableRelative(outputRoot, destination)}`);
+    } catch (error) {
+      fail(`Could not transfer the packaged macOS app into release: ${error?.message || error}`);
+    }
     copied.push(destination);
   }
 }
@@ -609,7 +697,7 @@ const packagedExecutable = process.platform === 'win32'
   ? path.join(packagedArtifact, `${safeName}.exe`)
   : path.join(packagedArtifact, 'Contents', 'MacOS', safeName);
 if (!fs.existsSync(packagedExecutable)) fail(`Packaged executable is missing: ${portableRelative(outputRoot, packagedExecutable)}`);
-if (process.platform === 'win32') validatePerformanceCandidate(packagedArtifact);
+if (process.platform === 'win32' && performanceProfile === 'full') validatePerformanceCandidate(packagedArtifact);
 const packagedSmoke = path.join(preview, `${platformFolder}-packaged-smoke.png`);
 const packagedSmokeSecond = path.join(preview, `${platformFolder}-packaged-smoke-2.png`);
 const packagedPaused = path.join(preview, `${platformFolder}-packaged-paused.png`);
@@ -625,7 +713,7 @@ runElectron(packagedExecutable, packagedArtifact, {
 });
 const packagedEvidenceFiles = [packagedSmoke, packagedSmokeSecond, packagedPaused, packagedSmokeTechnical, packagedEvidenceManifest];
 if (packagedEvidenceFiles.some((file) => !fs.existsSync(file))) fail(`Packaged runtime evidence is incomplete under: ${portableRelative(outputRoot, preview)}`);
-if (process.platform === 'win32') validatePerformanceCandidate(packagedArtifact);
+if (process.platform === 'win32' && performanceProfile === 'full') validatePerformanceCandidate(packagedArtifact);
 if (!runNode(privacyScript, ['--root', outputRoot, ...sourceArgs])) {
   fail('Post-package privacy audit failed. Remove host paths, unlisted raster files, copied source photos, or unsanitized error logs.');
 }
@@ -638,5 +726,6 @@ console.log(JSON.stringify({
   artifacts: copied.map((artifact) => portableRelative(outputRoot, artifact)),
   packagedSmoke: portableRelative(outputRoot, packagedSmoke),
   packagedSmokeTechnical: portableRelative(outputRoot, packagedSmokeTechnical),
+  performanceProfile,
   platform: `${process.platform}/${process.arch}`
 }, null, 2));

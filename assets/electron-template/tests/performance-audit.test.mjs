@@ -509,6 +509,12 @@ test('measured performance phases wait beyond exact release minimums', { skip: !
   assert.match(mainSource, /waitForPerformance\(performancePhaseWaitMs\(durationMs\)\)/);
 });
 
+test('performance report replacement retries transient Windows file locks within a strict bound', () => {
+  assert.match(mainSource, /PERFORMANCE_REPORT_RETRY_CODES\s*=\s*new Set\(\['EPERM', 'EACCES', 'EBUSY'\]\)/);
+  assert.match(mainSource, /function replacePerformanceReportFile\([\s\S]*attempt < 8[\s\S]*attempt === 7[\s\S]*Atomics\.wait\(/);
+  assert.match(mainSource, /replacePerformanceReportFile\(temporary, performanceAudit\.output\)/);
+});
+
 test('paused pets still process drag positions without resuming animation', () => {
   assert.match(mainSource, /if \(engine\.paused && dragStates\.size === 0\)/);
   assert.match(mainSource, /const snapshot = engine\.paused \? engine\.snapshot\(\) : engine\.update\(dt, cursor\)/);

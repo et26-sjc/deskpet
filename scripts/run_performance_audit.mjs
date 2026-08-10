@@ -132,6 +132,7 @@ if (finalParsed) {
 
 const completedAtEpochMs = Date.now();
 const runner = {
+  profile: args.quick ? 'quick' : 'full',
   outerTimeoutMs,
   launchedAt: new Date(launchedAtEpochMs).toISOString(),
   completedAt: new Date(completedAtEpochMs).toISOString(),
@@ -143,7 +144,8 @@ const runner = {
   reportState: terminalReport ? 'complete' : lastParsed ? 'partial' : 'missing'
 };
 
-const runnerFailed = launchError || timedOut || !exited || exitCode !== 0 || !terminalReport;
+const completedEvaluationFailure = exited && exitCode === 2 && terminalReport?.status === 'fail';
+const runnerFailed = launchError || timedOut || !exited || (!completedEvaluationFailure && exitCode !== 0) || !terminalReport;
 if (runnerFailed) {
   writeJson({
     schemaVersion: trustedAudit.PERFORMANCE_REPORT_SCHEMA_VERSION,
