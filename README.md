@@ -14,6 +14,11 @@ Skill 面向任意 1–8 人的随机合照：人数和本人位置来自用户�
 >
 > 段子归段子，照片里的人必须知情并同意。不要偷拍，不要拿它骚扰别人，也不要把别人的隐私当测试数据。
 
+## 演示视频
+
+- [哔哩哔哩：太想以前的大学室友了，于是把他们做成 Codex 桌面宠物。好兄弟，一辈子](https://b23.tv/VejtPPZ)
+- [小红书：把室友做成 Codex 桌宠——太想念大学室友了，于是把他们做成……](http://xhslink.cn/o/2HqcF17kZkO)
+
 ## 推荐环境
 
 - **推荐使用 Codex Desktop**：Skill 会复用 Codex 自带的 Node、pnpm、Python、Sharp 和图像生成能力，不需要用户自己搭一套开发环境。
@@ -286,6 +291,24 @@ Manifest V1 可能保存原图指纹或本机路径，因此不会被静默放�
 ### 屎追逐会跟随鼠标吗？
 
 本人不在照片时才会：点击穿透的屎平滑跟随真实鼠标，全员人形蜈蚣用限速、加速度和死区追它，不瞬移。本人在照片时，普通鼠标移动不影响任何人；整队只缓慢移动到安全位置一次，之后固定，本人持续拉，其他角色全员追吃。只有主动拖拽本人时整队才整体重定位，松手后固定。构建阶段会生成浅色与深色背景场景报告和完整窗口截图，验证固定行为、拖拽位移与透明边缘。
+
+## 平衡模式工作流
+
+日常制作、最终交付和 Skill 公共代码发布使用同一个入口：
+
+```powershell
+node scripts/run_workflow.mjs --profile iteration --root <输出目录> --source <照片>
+node scripts/run_workflow.mjs --profile delivery --root <输出目录> --source <照片>
+node scripts/run_workflow.mjs --profile skill-release
+```
+
+- `iteration`：比较人物、动作、配置和 runtime 指纹，只重做发生变化的人物与受影响场景；不打包，也不重复生成未变化证据。
+- `delivery`：完整检查实际项目，执行身份板、动作表、透明屎浅色/深色双帧验证、self-check、隐私检查、正式打包、packaged smoke 和真实 EXE 快速性能检查。自动门禁通过后仍需亲手检查托盘暂停/退出、拖拽、右键和透明区域点击穿透。
+- `skill-release`：运行完整 Skill 测试和官方校验；当公共候选指纹或性能合同变化时，执行脱敏虚构 5 人与 8 人 packaged 完整审计及 10 分钟内存检查，否则复用外部性能证书。
+
+项目增量状态保存在 `preview/.workflow-state-v1.json`，精简结果集中写入 `preview/workflow-summary.json`。性能缓存只保存在 `$CODEX_HOME/cache/love-roommate/performance-v1/`，不会进入 Skill、用户项目或 Git；公共代码、Electron、阈值、合同、夹具版本、缓存损坏或超过 30 天都会令其失效，普通照片、名字和人物素材变化不会误触发公共代码级长测。
+
+成功时只输出阶段、缓存命中和耗时，失败时才展开关键日志。当前 Windows x64 实测中，首次完整 5+8 发布检查约为 1740.6 秒；相同候选缓存命中后约为 52.5 秒，缩短约 97%。现有单独脚本继续兼容，`node scripts/release_check.mjs` 无参数时始终执行完整发布检查，不会偷偷变成快速检查。
 
 ## 开发与验证
 
