@@ -585,6 +585,30 @@ test('runtime manual review fingerprint includes scenario captures and reports',
   assert.match(selfCheck, /`humor-contract:\$\{humorContractFingerprint\}`/);
 });
 
+test('Skill release audit allows only the exact disclosed public maintainer QR assets', (t) => {
+  const root = workspace(t);
+  createPublishableFixture(root);
+  const community = path.join(root, 'assets', 'community');
+  fs.mkdirSync(community, { recursive: true });
+  for (const name of ['wechat-learning-group.jpg', 'xiaohongshu-wetianshuo.jpg']) {
+    fs.copyFileSync(path.join(skillRoot, 'assets', 'community', name), path.join(community, name));
+  }
+  fs.writeFileSync(path.join(root, 'README.md'), [
+    '# Generic Skill',
+    '以下两个二维码及其中的作者头像由作者本人主动公开。',
+    'assets/community/wechat-learning-group.jpg',
+    'assets/community/xiaohongshu-wetianshuo.jpg'
+  ].join('\n'));
+
+  const accepted = spawnSync(process.execPath, [auditScript, '--root', root], { encoding: 'utf8' });
+  assert.equal(accepted.status, 0, accepted.stderr);
+
+  fs.appendFileSync(path.join(community, 'wechat-learning-group.jpg'), Buffer.from([0]));
+  const tampered = spawnSync(process.execPath, [auditScript, '--root', root], { encoding: 'utf8' });
+  assert.notEqual(tampered.status, 0);
+  assert.match(tampered.stderr, /hash does not match/i);
+});
+
 test('self-check independently recomputes poop compositor transparency from the visible frame and underlay', () => {
   const selfCheck = fs.readFileSync(path.join(skillRoot, 'scripts', 'self_check_project.mjs'), 'utf8');
   assert.match(selfCheck, /async function validateScenarioEffectEvidence/);

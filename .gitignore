@@ -5,6 +5,8 @@ preview/
 
 *.png
 *.jpg
+!assets/community/wechat-learning-group.jpg
+!assets/community/xiaohongshu-wetianshuo.jpg
 *.jpeg
 *.webp
 *.gif
