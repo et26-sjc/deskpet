@@ -1,12 +1,21 @@
 {
   "name": "friend-deskpet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A gentle photorealistic companion desktop pet framework",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build": "electron-builder"
   },
   "devDependencies": {
-    "electron": "^41.0.0"
+    "electron": "^41.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.et26.frienddeskpet",
+    "productName": "Friend DeskPet",
+    "win": {
+      "target": "nsis"
+    }
   }
 }
