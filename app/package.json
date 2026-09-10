@@ -1,0 +1,12 @@
+{
+  "name": "friend-deskpet",
+  "version": "0.1.0",
+  "description": "A gentle photorealistic companion desktop pet framework",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^41.0.0"
+  }
+}
