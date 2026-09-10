@@ -1,7 +1,10 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
+const MovementController = require('./movement');
+const { createTray } = require('./tray');
 
 let petWindow;
+let movement;
 
 function createPetWindow() {
   petWindow = new BrowserWindow({
@@ -17,8 +20,16 @@ function createPetWindow() {
     }
   });
 
-  petWindow.setIgnoreMouseEvents(false);
   petWindow.loadFile(path.join(__dirname, 'renderer/index.html'));
+
+  movement = new MovementController(petWindow);
+  movement.start();
+
+  createTray({
+    pause: () => movement.pause(),
+    resume: () => movement.resume(),
+    reload: () => petWindow.reload()
+  });
 }
 
 app.whenReady().then(createPetWindow);
