@@ -1,0 +1,27 @@
+{
+  "name": "friend-companion",
+  "mode": "companion",
+  "fps": 30,
+  "states": {
+    "idle": {
+      "duration_seconds": [10, 30],
+      "actions": ["idle", "look", "blink"]
+    },
+    "walk": {
+      "speed": 2,
+      "actions": ["walk_left", "walk_right"]
+    },
+    "interaction": {
+      "trigger": "click",
+      "actions": ["wave"]
+    },
+    "sleep": {
+      "trigger": "night",
+      "actions": ["sleep"]
+    }
+  },
+  "transition": {
+    "idle_to_walk_probability": 0.2,
+    "walk_to_idle_probability": 0.8
+  }
+}
