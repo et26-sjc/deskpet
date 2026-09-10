@@ -1,0 +1,19 @@
+{
+  "name": "Friend Pet",
+  "style": "photorealistic companion",
+  "behavior": {
+    "idle": true,
+    "walk": true,
+    "wave_on_click": true,
+    "sleep_at_night": true
+  },
+  "movement": {
+    "speed": 1.5,
+    "random_walk": true,
+    "mouse_chase": false
+  },
+  "personality": {
+    "kind": true,
+    "annoying": false
+  }
+}
